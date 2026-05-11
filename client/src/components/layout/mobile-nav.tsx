@@ -37,6 +37,8 @@ import {
   LifeBuoy,
   Handshake,
   TrendingUp,
+  Wallet,
+  ScrollText,
 } from "lucide-react";
 import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
 import { Button } from "@/components/ui/button";
@@ -132,6 +134,7 @@ interface SectionRoute {
 }
 
 const sectionRoutes: SectionRoute[] = [
+  { sectionId: "payroll", paths: ["/payroll", "/payroll/employees", "/payroll/schedules", "/payroll/runs", "/payroll/gl", "/payroll/audit"] },
   { sectionId: "my-workspace", paths: ["/my-dashboard", "/my-assignments", "/my-projects", "/time", "/expenses", "/expense-reports", "/my-reimbursements", "/my-raidd"] },
   { sectionId: "portfolio", paths: ["/", "/dashboard", "/portfolio/timeline", "/portfolio/raidd", "/reports", "/executive-narrative", "/projects", "/clients", "/resource-management", "/resource-planning", "/resource-planning/capacity", "/crm/deals"] },
   { sectionId: "financial", paths: ["/billing", "/invoice-report", "/client-revenue-report", "/expense-management", "/expense-approval", "/reimbursement-batches", "/rates"] },
@@ -154,9 +157,12 @@ function getSectionForPath(path: string): string | null {
 function loadMobileSectionState(): Record<string, boolean> {
   try {
     const stored = localStorage.getItem(MOBILE_STORAGE_KEY);
-    if (stored) return JSON.parse(stored);
+    if (stored) {
+      const parsed = JSON.parse(stored) as Record<string, boolean>;
+      return { "my-workspace": true, "payroll": true, ...parsed };
+    }
   } catch {}
-  return { "my-workspace": true };
+  return { "my-workspace": true, "payroll": true };
 }
 
 function saveMobileSectionState(state: Record<string, boolean>) {
@@ -234,6 +240,26 @@ export function MobileNav() {
           
           <ScrollArea className="flex-1">
             <div className="pb-4">
+              {hasAnyRole(['admin', 'billing-admin']) && (
+                <MobileCollapsibleSection
+                  id="payroll"
+                  title="Payroll (Gemini)"
+                  isOpen={!!openSections["payroll"]}
+                  onToggle={handleToggle}
+                >
+                  <MobileSubGroupLabel label="Overview" />
+                  <MobileNavItem href="/payroll" icon={<Wallet />} label="Payroll Dashboard" onClick={handleNavClick} />
+                  <MobileSubGroupLabel label="People" />
+                  <MobileNavItem href="/payroll/employees" icon={<Users />} label="Employees" onClick={handleNavClick} />
+                  <MobileNavItem href="/payroll/schedules" icon={<CalendarClock />} label="Pay Schedules" onClick={handleNavClick} />
+                  <MobileSubGroupLabel label="Process" />
+                  <MobileNavItem href="/payroll/runs" icon={<Banknote />} label="Payroll Runs" onClick={handleNavClick} />
+                  <MobileSubGroupLabel label="Accounting" />
+                  <MobileNavItem href="/payroll/gl" icon={<Calculator />} label="General Ledger" onClick={handleNavClick} />
+                  <MobileNavItem href="/payroll/audit" icon={<ScrollText />} label="Audit Log" onClick={handleNavClick} />
+                </MobileCollapsibleSection>
+              )}
+
               <MobileCollapsibleSection
                 id="my-workspace"
                 title="My Workspace"
