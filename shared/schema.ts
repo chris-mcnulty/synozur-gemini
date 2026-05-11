@@ -4331,3 +4331,297 @@ export type AgentAction = typeof agentActions.$inferSelect;
 // GALAXY CLIENT PORTAL API
 // ============================================================================
 export * from "./galaxy-schema";
+
+// ============================================================================
+// GEMINI PAYROLL & WORKFORCE MANAGEMENT (Phase 1)
+// All monetary amounts stored as integer cents to avoid floating-point drift.
+// All payroll-relevant actions append to payroll_audit_log for SOC2 alignment.
+// ============================================================================
+
+export const payrollEmployeeTypeEnum = z.enum(['w2', '1099']);
+export type PayrollEmployeeType = z.infer<typeof payrollEmployeeTypeEnum>;
+
+export const payrollEmployeeStatusEnum = z.enum(['active', 'onboarding', 'terminated', 'on_leave']);
+export type PayrollEmployeeStatus = z.infer<typeof payrollEmployeeStatusEnum>;
+
+export const payrollCompTypeEnum = z.enum(['salary', 'hourly', 'commission', 'bonus']);
+export type PayrollCompType = z.infer<typeof payrollCompTypeEnum>;
+
+export const payrollScheduleFrequencyEnum = z.enum(['weekly', 'biweekly', 'semimonthly', 'monthly']);
+export type PayrollScheduleFrequency = z.infer<typeof payrollScheduleFrequencyEnum>;
+
+export const payrollRunStatusEnum = z.enum(['draft', 'previewed', 'approved', 'finalized', 'voided']);
+export type PayrollRunStatus = z.infer<typeof payrollRunStatusEnum>;
+
+export const payrollDeductionTypeEnum = z.enum(['pre_tax', 'post_tax', 'garnishment', 'employer_match']);
+export type PayrollDeductionType = z.infer<typeof payrollDeductionTypeEnum>;
+
+// Employees & contractors managed by the payroll module.
+// Linked optionally to a platform user; tenant-scoped for isolation.
+export const payrollEmployees = pgTable("payroll_employees", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  tenantId: varchar("tenant_id").notNull().references(() => tenants.id, { onDelete: 'cascade' }),
+  userId: varchar("user_id").references(() => users.id, { onDelete: 'set null' }),
+  externalEmployeeNumber: varchar("external_employee_number", { length: 64 }),
+  firstName: text("first_name").notNull(),
+  lastName: text("last_name").notNull(),
+  email: varchar("email", { length: 255 }).notNull(),
+  employeeType: varchar("employee_type", { length: 16 }).notNull(), // w2 | 1099
+  status: varchar("status", { length: 20 }).notNull().default('onboarding'),
+  hireDate: date("hire_date"),
+  terminationDate: date("termination_date"),
+  // U.S. tax fields (stubbed; real PII would be tokenized in production)
+  ssnLast4: varchar("ssn_last4", { length: 4 }),
+  homeAddress: text("home_address"),
+  homeCity: text("home_city"),
+  homeStateCode: varchar("home_state_code", { length: 2 }),
+  homeZip: varchar("home_zip", { length: 10 }),
+  workStateCode: varchar("work_state_code", { length: 2 }),
+  // W-4 inputs (post-2020 form)
+  filingStatus: varchar("filing_status", { length: 20 }), // single | married_jointly | head_of_household
+  w4MultipleJobs: boolean("w4_multiple_jobs").default(false),
+  w4DependentsAmountCents: integer("w4_dependents_amount_cents").default(0),
+  w4OtherIncomeCents: integer("w4_other_income_cents").default(0),
+  w4DeductionsCents: integer("w4_deductions_cents").default(0),
+  w4ExtraWithholdingCents: integer("w4_extra_withholding_cents").default(0),
+  defaultPayScheduleId: varchar("default_pay_schedule_id"),
+  // Soft delete for compliance
+  deletedAt: timestamp("deleted_at"),
+  createdAt: timestamp("created_at").notNull().default(sql`now()`),
+  updatedAt: timestamp("updated_at").notNull().default(sql`now()`),
+}, (t) => ({
+  tenantIdx: index("idx_payroll_emp_tenant").on(t.tenantId),
+  emailIdx: index("idx_payroll_emp_email").on(t.tenantId, t.email),
+}));
+
+export const insertPayrollEmployeeSchema = createInsertSchema(payrollEmployees).omit({
+  id: true, createdAt: true, updatedAt: true, deletedAt: true,
+});
+export type InsertPayrollEmployee = z.infer<typeof insertPayrollEmployeeSchema>;
+export type PayrollEmployee = typeof payrollEmployees.$inferSelect;
+
+// Compensation history — immutable rows; effective-dated.
+export const payrollCompensation = pgTable("payroll_compensation", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  tenantId: varchar("tenant_id").notNull().references(() => tenants.id, { onDelete: 'cascade' }),
+  employeeId: varchar("employee_id").notNull().references(() => payrollEmployees.id, { onDelete: 'cascade' }),
+  compType: varchar("comp_type", { length: 20 }).notNull(), // salary | hourly | commission | bonus
+  // For salary: annual amount. For hourly: per-hour rate. Commission/bonus: stored as paid amount.
+  amountCents: integer("amount_cents").notNull(),
+  hoursPerWeek: decimal("hours_per_week", { precision: 5, scale: 2 }), // for salary FTE conversion
+  effectiveFrom: date("effective_from").notNull(),
+  effectiveTo: date("effective_to"),
+  notes: text("notes"),
+  createdAt: timestamp("created_at").notNull().default(sql`now()`),
+}, (t) => ({
+  empIdx: index("idx_payroll_comp_emp").on(t.employeeId, t.effectiveFrom),
+  tenantIdx: index("idx_payroll_comp_tenant").on(t.tenantId),
+}));
+
+export const insertPayrollCompensationSchema = createInsertSchema(payrollCompensation).omit({ id: true, createdAt: true });
+export type InsertPayrollCompensation = z.infer<typeof insertPayrollCompensationSchema>;
+export type PayrollCompensation = typeof payrollCompensation.$inferSelect;
+
+// Pay schedules — define cadence, period boundaries, and pay date offset.
+export const payrollPaySchedules = pgTable("payroll_pay_schedules", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  tenantId: varchar("tenant_id").notNull().references(() => tenants.id, { onDelete: 'cascade' }),
+  name: text("name").notNull(),
+  frequency: varchar("frequency", { length: 20 }).notNull(),
+  // Anchor: first known period start to compute future periods deterministically.
+  anchorPeriodStart: date("anchor_period_start").notNull(),
+  // Days after period end when pay date occurs (e.g., 5 = pay 5 days after period close).
+  payDateOffsetDays: integer("pay_date_offset_days").notNull().default(5),
+  isActive: boolean("is_active").notNull().default(true),
+  createdAt: timestamp("created_at").notNull().default(sql`now()`),
+}, (t) => ({
+  tenantIdx: index("idx_payroll_sched_tenant").on(t.tenantId),
+}));
+
+export const insertPayrollPayScheduleSchema = createInsertSchema(payrollPaySchedules).omit({ id: true, createdAt: true });
+export type InsertPayrollPaySchedule = z.infer<typeof insertPayrollPayScheduleSchema>;
+export type PayrollPaySchedule = typeof payrollPaySchedules.$inferSelect;
+
+// Recurring deductions / benefits / garnishments (per employee).
+export const payrollDeductions = pgTable("payroll_deductions", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  tenantId: varchar("tenant_id").notNull().references(() => tenants.id, { onDelete: 'cascade' }),
+  employeeId: varchar("employee_id").notNull().references(() => payrollEmployees.id, { onDelete: 'cascade' }),
+  name: text("name").notNull(), // e.g. "401(k)", "Health - Family"
+  deductionType: varchar("deduction_type", { length: 20 }).notNull(),
+  // Either amountCents (fixed) or percent of gross.
+  amountCents: integer("amount_cents"),
+  percentOfGross: decimal("percent_of_gross", { precision: 6, scale: 4 }),
+  employerMatchCents: integer("employer_match_cents"),
+  employerMatchPercent: decimal("employer_match_percent", { precision: 6, scale: 4 }),
+  glAccountId: varchar("gl_account_id"),
+  effectiveFrom: date("effective_from").notNull(),
+  effectiveTo: date("effective_to"),
+  isActive: boolean("is_active").notNull().default(true),
+  createdAt: timestamp("created_at").notNull().default(sql`now()`),
+}, (t) => ({
+  empIdx: index("idx_payroll_ded_emp").on(t.employeeId),
+  tenantIdx: index("idx_payroll_ded_tenant").on(t.tenantId),
+}));
+
+export const insertPayrollDeductionSchema = createInsertSchema(payrollDeductions).omit({ id: true, createdAt: true });
+export type InsertPayrollDeduction = z.infer<typeof insertPayrollDeductionSchema>;
+export type PayrollDeduction = typeof payrollDeductions.$inferSelect;
+
+// PTO accrual & balances (lightweight per-employee bucket).
+export const payrollPtoBalances = pgTable("payroll_pto_balances", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  tenantId: varchar("tenant_id").notNull().references(() => tenants.id, { onDelete: 'cascade' }),
+  employeeId: varchar("employee_id").notNull().references(() => payrollEmployees.id, { onDelete: 'cascade' }),
+  policyName: text("policy_name").notNull().default('Vacation'),
+  accrualHoursPerPeriod: decimal("accrual_hours_per_period", { precision: 6, scale: 2 }).notNull().default("0"),
+  balanceHours: decimal("balance_hours", { precision: 8, scale: 2 }).notNull().default("0"),
+  usedHoursYtd: decimal("used_hours_ytd", { precision: 8, scale: 2 }).notNull().default("0"),
+  updatedAt: timestamp("updated_at").notNull().default(sql`now()`),
+}, (t) => ({
+  empIdx: uniqueIndex("uq_payroll_pto_emp_policy").on(t.employeeId, t.policyName),
+}));
+
+export const insertPayrollPtoBalanceSchema = createInsertSchema(payrollPtoBalances).omit({ id: true, updatedAt: true });
+export type InsertPayrollPtoBalance = z.infer<typeof insertPayrollPtoBalanceSchema>;
+export type PayrollPtoBalance = typeof payrollPtoBalances.$inferSelect;
+
+// Tax jurisdictions — abstraction so federal / state / local rules are pluggable.
+export const payrollTaxJurisdictions = pgTable("payroll_tax_jurisdictions", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  tenantId: varchar("tenant_id").references(() => tenants.id, { onDelete: 'cascade' }), // null = platform-level
+  code: varchar("code", { length: 32 }).notNull(), // 'US-FED' | 'US-CA' | 'US-NY-NYC'
+  name: text("name").notNull(),
+  level: varchar("level", { length: 20 }).notNull(), // federal | state | local
+  // Rule definition — interpreted by payroll-engine. Supports flat_percent | brackets | none | todo.
+  rule: jsonb("rule").$type<Record<string, any>>().notNull(),
+  isActive: boolean("is_active").notNull().default(true),
+  createdAt: timestamp("created_at").notNull().default(sql`now()`),
+}, (t) => ({
+  codeIdx: uniqueIndex("uq_payroll_jur_tenant_code").on(t.tenantId, t.code),
+}));
+
+export const insertPayrollTaxJurisdictionSchema = createInsertSchema(payrollTaxJurisdictions).omit({ id: true, createdAt: true });
+export type InsertPayrollTaxJurisdiction = z.infer<typeof insertPayrollTaxJurisdictionSchema>;
+export type PayrollTaxJurisdiction = typeof payrollTaxJurisdictions.$inferSelect;
+
+// Payroll runs — immutable once finalized.
+export const payrollRuns = pgTable("payroll_runs", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  tenantId: varchar("tenant_id").notNull().references(() => tenants.id, { onDelete: 'cascade' }),
+  payScheduleId: varchar("pay_schedule_id").references(() => payrollPaySchedules.id, { onDelete: 'restrict' }),
+  periodStart: date("period_start").notNull(),
+  periodEnd: date("period_end").notNull(),
+  payDate: date("pay_date").notNull(),
+  status: varchar("status", { length: 20 }).notNull().default('draft'),
+  // Totals (cached for reporting; recomputed from items on preview).
+  totalGrossCents: integer("total_gross_cents").notNull().default(0),
+  totalEmployeeTaxCents: integer("total_employee_tax_cents").notNull().default(0),
+  totalEmployerTaxCents: integer("total_employer_tax_cents").notNull().default(0),
+  totalDeductionsCents: integer("total_deductions_cents").notNull().default(0),
+  totalNetCents: integer("total_net_cents").notNull().default(0),
+  // Idempotency: client-supplied key prevents duplicate run creation.
+  idempotencyKey: varchar("idempotency_key", { length: 128 }),
+  createdBy: varchar("created_by").references(() => users.id),
+  approvedBy: varchar("approved_by").references(() => users.id),
+  approvedAt: timestamp("approved_at"),
+  finalizedAt: timestamp("finalized_at"),
+  notes: text("notes"),
+  createdAt: timestamp("created_at").notNull().default(sql`now()`),
+}, (t) => ({
+  tenantIdx: index("idx_payroll_run_tenant").on(t.tenantId, t.payDate),
+  idempotencyIdx: uniqueIndex("uq_payroll_run_idem").on(t.tenantId, t.idempotencyKey),
+}));
+
+export const insertPayrollRunSchema = createInsertSchema(payrollRuns).omit({
+  id: true, createdAt: true, approvedAt: true, finalizedAt: true,
+  totalGrossCents: true, totalEmployeeTaxCents: true, totalEmployerTaxCents: true,
+  totalDeductionsCents: true, totalNetCents: true,
+});
+export type InsertPayrollRun = z.infer<typeof insertPayrollRunSchema>;
+export type PayrollRun = typeof payrollRuns.$inferSelect;
+
+// One row per (run, employee) — immutable after finalize.
+export const payrollRunItems = pgTable("payroll_run_items", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  tenantId: varchar("tenant_id").notNull().references(() => tenants.id, { onDelete: 'cascade' }),
+  runId: varchar("run_id").notNull().references(() => payrollRuns.id, { onDelete: 'cascade' }),
+  employeeId: varchar("employee_id").notNull().references(() => payrollEmployees.id, { onDelete: 'restrict' }),
+  // Inputs
+  hoursWorked: decimal("hours_worked", { precision: 8, scale: 2 }).default("0"),
+  overtimeHours: decimal("overtime_hours", { precision: 8, scale: 2 }).default("0"),
+  ptoHoursUsed: decimal("pto_hours_used", { precision: 8, scale: 2 }).default("0"),
+  bonusCents: integer("bonus_cents").notNull().default(0),
+  commissionCents: integer("commission_cents").notNull().default(0),
+  retroPayCents: integer("retro_pay_cents").notNull().default(0),
+  // Computed
+  grossCents: integer("gross_cents").notNull().default(0),
+  employeeTaxCents: integer("employee_tax_cents").notNull().default(0),
+  employerTaxCents: integer("employer_tax_cents").notNull().default(0),
+  preTaxDeductionCents: integer("pre_tax_deduction_cents").notNull().default(0),
+  postTaxDeductionCents: integer("post_tax_deduction_cents").notNull().default(0),
+  netPayCents: integer("net_pay_cents").notNull().default(0),
+  // Detailed breakdown for audit (lines).
+  breakdown: jsonb("breakdown").$type<Record<string, any>>(),
+  createdAt: timestamp("created_at").notNull().default(sql`now()`),
+}, (t) => ({
+  runIdx: index("idx_payroll_run_item_run").on(t.runId),
+  empIdx: index("idx_payroll_run_item_emp").on(t.employeeId),
+  uniq: uniqueIndex("uq_payroll_run_item").on(t.runId, t.employeeId),
+}));
+
+export const insertPayrollRunItemSchema = createInsertSchema(payrollRunItems).omit({ id: true, createdAt: true });
+export type InsertPayrollRunItem = z.infer<typeof insertPayrollRunItemSchema>;
+export type PayrollRunItem = typeof payrollRunItems.$inferSelect;
+
+// GL accounts & mappings — drive accounting export (CSV/JSON).
+export const payrollGlAccounts = pgTable("payroll_gl_accounts", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  tenantId: varchar("tenant_id").notNull().references(() => tenants.id, { onDelete: 'cascade' }),
+  accountNumber: varchar("account_number", { length: 32 }).notNull(),
+  accountName: text("account_name").notNull(),
+  accountType: varchar("account_type", { length: 32 }).notNull(), // expense | liability | asset
+  isActive: boolean("is_active").notNull().default(true),
+  createdAt: timestamp("created_at").notNull().default(sql`now()`),
+}, (t) => ({
+  uniq: uniqueIndex("uq_payroll_gl_acct").on(t.tenantId, t.accountNumber),
+}));
+
+export const insertPayrollGlAccountSchema = createInsertSchema(payrollGlAccounts).omit({ id: true, createdAt: true });
+export type InsertPayrollGlAccount = z.infer<typeof insertPayrollGlAccountSchema>;
+export type PayrollGlAccount = typeof payrollGlAccounts.$inferSelect;
+
+export const payrollGlMappings = pgTable("payroll_gl_mappings", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  tenantId: varchar("tenant_id").notNull().references(() => tenants.id, { onDelete: 'cascade' }),
+  // Category being mapped: 'wages' | 'employer_tax' | 'employee_tax_liability' | 'pre_tax_deduction' | 'post_tax_deduction' | 'garnishment_liability' | 'net_pay_clearing'
+  category: varchar("category", { length: 64 }).notNull(),
+  glAccountId: varchar("gl_account_id").notNull().references(() => payrollGlAccounts.id, { onDelete: 'restrict' }),
+  createdAt: timestamp("created_at").notNull().default(sql`now()`),
+}, (t) => ({
+  uniq: uniqueIndex("uq_payroll_gl_map").on(t.tenantId, t.category),
+}));
+
+export const insertPayrollGlMappingSchema = createInsertSchema(payrollGlMappings).omit({ id: true, createdAt: true });
+export type InsertPayrollGlMapping = z.infer<typeof insertPayrollGlMappingSchema>;
+export type PayrollGlMapping = typeof payrollGlMappings.$inferSelect;
+
+// Append-only audit log of payroll-relevant actions.
+export const payrollAuditLog = pgTable("payroll_audit_log", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  tenantId: varchar("tenant_id").notNull().references(() => tenants.id, { onDelete: 'cascade' }),
+  actorUserId: varchar("actor_user_id").references(() => users.id),
+  action: varchar("action", { length: 64 }).notNull(),
+  entityType: varchar("entity_type", { length: 64 }).notNull(),
+  entityId: varchar("entity_id", { length: 128 }),
+  details: jsonb("details").$type<Record<string, any>>(),
+  ipAddress: varchar("ip_address", { length: 64 }),
+  occurredAt: timestamp("occurred_at").notNull().default(sql`now()`),
+}, (t) => ({
+  tenantIdx: index("idx_payroll_audit_tenant").on(t.tenantId, t.occurredAt),
+  entityIdx: index("idx_payroll_audit_entity").on(t.entityType, t.entityId),
+}));
+
+export const insertPayrollAuditLogSchema = createInsertSchema(payrollAuditLog).omit({ id: true, occurredAt: true });
+export type InsertPayrollAuditLog = z.infer<typeof insertPayrollAuditLogSchema>;
+export type PayrollAuditLog = typeof payrollAuditLog.$inferSelect;

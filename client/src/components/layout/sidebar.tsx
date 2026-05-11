@@ -42,6 +42,8 @@ import {
   Plug,
   TrendingUp,
   Bell,
+  Wallet,
+  ScrollText,
 } from "lucide-react";
 import { Collapsible, CollapsibleTrigger, CollapsibleContent } from "@/components/ui/collapsible";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -137,6 +139,7 @@ const sectionRoutes: SectionRoute[] = [
   { sectionId: "financial", paths: ["/billing", "/invoice-report", "/client-revenue-report", "/expense-management", "/expense-approval", "/approvals/time", "/reimbursement-batches", "/contractor-invoices", "/rates"] },
   { sectionId: "administration", paths: ["/users", "/organization-settings", "/system-settings", "/admin/scheduled-jobs", "/admin/agent-card-health", "/admin/background-jobs", "/file-repository", "/admin/sharepoint", "/m365-integration", "/vocabulary", "/ai-grounding", "/ai-settings"] },
   { sectionId: "platform", paths: ["/platform/tenants", "/platform/service-plans", "/platform/users", "/platform/airports", "/platform/oconus", "/platform/grounding-docs"] },
+  { sectionId: "payroll", paths: ["/payroll", "/payroll/employees", "/payroll/schedules", "/payroll/runs", "/payroll/gl", "/payroll/audit"] },
 ];
 
 function getSectionForPath(path: string): string | null {
@@ -312,6 +315,26 @@ export function Sidebar() {
               </CollapsibleSection>
             )}
             
+            {hasAnyRole(['admin', 'billing-admin']) && (
+              <CollapsibleSection
+                id="payroll"
+                title="Payroll (Gemini)"
+                isOpen={!!openSections["payroll"]}
+                onToggle={handleToggle}
+              >
+                <SubGroupLabel label="Overview" />
+                <SidebarItem href="/payroll" icon={<Wallet />} label="Payroll Dashboard" />
+                <SubGroupLabel label="People" />
+                <SidebarItem href="/payroll/employees" icon={<Users />} label="Employees" />
+                <SidebarItem href="/payroll/schedules" icon={<CalendarClock />} label="Pay Schedules" />
+                <SubGroupLabel label="Process" />
+                <SidebarItem href="/payroll/runs" icon={<Banknote />} label="Payroll Runs" />
+                <SubGroupLabel label="Accounting" />
+                <SidebarItem href="/payroll/gl" icon={<Calculator />} label="General Ledger" />
+                <SidebarItem href="/payroll/audit" icon={<ScrollText />} label="Audit Log" />
+              </CollapsibleSection>
+            )}
+
             {isPlatformAdmin && (
               <CollapsibleSection
                 id="platform"

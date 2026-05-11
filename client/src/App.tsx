@@ -73,6 +73,14 @@ import CapacityPlanning from "@/pages/capacity-planning";
 import NotFound from "@/pages/not-found";
 import NotificationsPage from "@/pages/notifications";
 import NotificationPreferencesPage from "@/pages/notification-preferences";
+import PayrollDashboard from "@/pages/payroll-dashboard";
+import PayrollEmployees from "@/pages/payroll-employees";
+import PayrollEmployeeDetail from "@/pages/payroll-employee-detail";
+import PayrollSchedules from "@/pages/payroll-schedules";
+import PayrollRuns from "@/pages/payroll-runs";
+import PayrollRunDetail from "@/pages/payroll-run-detail";
+import PayrollGl from "@/pages/payroll-gl";
+import PayrollAudit from "@/pages/payroll-audit";
 import { useQuery } from "@tanstack/react-query";
 import { Redirect, useLocation } from "wouter";
 import { useEffect, useState } from "react";
@@ -483,6 +491,31 @@ function Router() {
       </Route>
       <Route path="/notifications/preferences">
         {user ? <NotificationPreferencesPage /> : <Redirect to="/login" />}
+      </Route>
+      {/* Gemini Payroll */}
+      <Route path="/payroll">
+        {user ? <PermissionGuard allowedRoles={["admin", "billing-admin"]}><PayrollDashboard /></PermissionGuard> : <Redirect to="/login" />}
+      </Route>
+      <Route path="/payroll/employees">
+        {user ? <PermissionGuard allowedRoles={["admin", "billing-admin"]}><PayrollEmployees /></PermissionGuard> : <Redirect to="/login" />}
+      </Route>
+      <Route path="/payroll/employees/:id">
+        {user ? <PermissionGuard allowedRoles={["admin", "billing-admin"]}><PayrollEmployeeDetail /></PermissionGuard> : <Redirect to="/login" />}
+      </Route>
+      <Route path="/payroll/schedules">
+        {user ? <PermissionGuard allowedRoles={["admin", "billing-admin"]}><PayrollSchedules /></PermissionGuard> : <Redirect to="/login" />}
+      </Route>
+      <Route path="/payroll/runs">
+        {user ? <PermissionGuard allowedRoles={["admin", "billing-admin"]}><PayrollRuns /></PermissionGuard> : <Redirect to="/login" />}
+      </Route>
+      <Route path="/payroll/runs/:id">
+        {user ? <PermissionGuard allowedRoles={["admin", "billing-admin"]}><PayrollRunDetail /></PermissionGuard> : <Redirect to="/login" />}
+      </Route>
+      <Route path="/payroll/gl">
+        {user ? <PermissionGuard allowedRoles={["admin", "billing-admin"]}><PayrollGl /></PermissionGuard> : <Redirect to="/login" />}
+      </Route>
+      <Route path="/payroll/audit">
+        {user ? <PermissionGuard allowedRoles={["admin", "billing-admin"]}><PayrollAudit /></PermissionGuard> : <Redirect to="/login" />}
       </Route>
       {/* Fallback to 404 */}
       <Route component={NotFound} />
