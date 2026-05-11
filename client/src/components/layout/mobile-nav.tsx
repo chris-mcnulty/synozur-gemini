@@ -222,7 +222,7 @@ export function MobileNav() {
         </SheetTrigger>
         <SheetContent side="left" className="w-[85vw] sm:w-[385px] p-0 flex flex-col">
           <SheetHeader className="px-6 py-4 border-b">
-            <SheetTitle className="text-left">Constellation</SheetTitle>
+            <SheetTitle className="text-left">Gemini</SheetTitle>
             <div className="text-sm text-muted-foreground">
               {user ? (
                 user.firstName && user.lastName 
