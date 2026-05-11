@@ -157,9 +157,16 @@ function getSectionForPath(path: string): string | null {
 function loadSectionState(): Record<string, boolean> {
   try {
     const stored = localStorage.getItem(STORAGE_KEY);
-    if (stored) return JSON.parse(stored);
+    if (stored) {
+      const parsed = JSON.parse(stored);
+      // Ensure payroll is open by default unless explicitly closed by the user
+      if (parsed["payroll"] === undefined) {
+        parsed["payroll"] = true;
+      }
+      return parsed;
+    }
   } catch {}
-  return { "my-workspace": true };
+  return { "my-workspace": true, "payroll": true };
 }
 
 function saveSectionState(state: Record<string, boolean>) {
