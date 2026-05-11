@@ -158,12 +158,12 @@ function loadSectionState(): Record<string, boolean> {
   try {
     const stored = localStorage.getItem(STORAGE_KEY);
     if (stored) {
-      const parsed = JSON.parse(stored);
-      // Ensure payroll is open by default unless explicitly closed by the user
-      if (parsed["payroll"] === undefined) {
-        parsed["payroll"] = true;
-      }
-      return parsed;
+      const parsed = JSON.parse(stored) as Record<string, boolean>;
+      return {
+        "my-workspace": true,
+        "payroll": true,
+        ...parsed,
+      };
     }
   } catch {}
   return { "my-workspace": true, "payroll": true };
