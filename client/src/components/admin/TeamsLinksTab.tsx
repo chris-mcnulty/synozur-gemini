@@ -637,15 +637,6 @@ function EstimateRow({
             <Unlink className="h-3.5 w-3.5 mr-1" /> Unlink
           </Button>
         )}
-        <Button
-          variant="ghost"
-          size="sm"
-          onClick={() => navigate(`/estimates/${estimate.id}`)}
-          data-testid={`button-relink-estimate-${estimate.id}`}
-        >
-          <RefreshCw className="h-3.5 w-3.5 mr-1" />
-          {linked ? "Re-link" : "Link"}
-        </Button>
       </div>
     </div>
   );

@@ -133,7 +133,7 @@ interface SectionRoute {
 
 const sectionRoutes: SectionRoute[] = [
   { sectionId: "my-workspace", paths: ["/my-dashboard", "/my-assignments", "/my-projects", "/time", "/expenses", "/expense-reports", "/my-reimbursements", "/my-raidd"] },
-  { sectionId: "portfolio", paths: ["/", "/dashboard", "/portfolio/timeline", "/portfolio/raidd", "/reports", "/executive-narrative", "/projects", "/clients", "/resource-management", "/resource-planning", "/resource-planning/capacity", "/estimates", "/crm/deals"] },
+  { sectionId: "portfolio", paths: ["/", "/dashboard", "/portfolio/timeline", "/portfolio/raidd", "/reports", "/executive-narrative", "/projects", "/clients", "/resource-management", "/resource-planning", "/resource-planning/capacity", "/crm/deals"] },
   { sectionId: "financial", paths: ["/billing", "/invoice-report", "/client-revenue-report", "/expense-management", "/expense-approval", "/reimbursement-batches", "/rates"] },
   { sectionId: "administration", paths: ["/users", "/organization-settings", "/system-settings", "/admin/scheduled-jobs", "/file-repository", "/admin/sharepoint", "/vocabulary", "/ai-grounding", "/ai-settings"] },
   { sectionId: "platform", paths: ["/platform/tenants", "/platform/service-plans", "/platform/users", "/platform/airports", "/platform/oconus", "/platform/grounding-docs"] },
@@ -278,7 +278,6 @@ export function MobileNav() {
                     <MobileNavItem href="/resource-management" icon={<Users />} label="Resources" onClick={handleNavClick} />
                     <MobileNavItem href="/resource-planning" icon={<GanttChart />} label="Resource Planning" requiredRoles={["admin", "pm", "portfolio-manager", "executive"]} onClick={handleNavClick} />
                     <MobileNavItem href="/resource-planning/capacity" icon={<TrendingUp />} label="Capacity Planning" requiredRoles={["admin", "pm", "portfolio-manager", "executive"]} onClick={handleNavClick} />
-                    <MobileNavItem href="/estimates" icon={<FileText />} label="Estimates" onClick={handleNavClick} />
                     <MobileSubGroupLabel label="Pipeline" />
                     <MobileNavItem href="/crm/deals" icon={<Handshake />} label="CRM Deals" requiredRoles={["admin", "pm", "portfolio-manager"]} onClick={handleNavClick} />
                   </MobileCollapsibleSection>

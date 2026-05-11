@@ -314,11 +314,9 @@ export async function registerRoutes(app: Express): Promise<void> {
     smartFileStorage,
   });
 
-  // Register estimate routes (extracted module)
-  registerEstimateRoutes(app, {
-    requireAuth,
-    requireRole,
-  });
+  // Estimate routes intentionally unregistered — Estimates module removed from product surface.
+  // The route file (server/routes/estimates.ts) is retained only because it exports
+  // `generateRetainerPaymentMilestones` used by projects routes.
 
   registerInvoiceRoutes(app, {
     requireAuth,

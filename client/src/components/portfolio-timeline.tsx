@@ -462,13 +462,11 @@ export function PortfolioTimeline() {
                           {/* Item label */}
                           <div
                             className={`${clientLabelWidth} shrink-0 px-3 py-2 border-r flex items-center gap-2 cursor-pointer`}
-                            onClick={() =>
-                              navigate(
-                                item.type === "project"
-                                  ? `/projects/${item.id}`
-                                  : `/estimates/${item.id}`
-                              )
-                            }
+                            onClick={() => {
+                              if (item.type === "project") {
+                                navigate(`/projects/${item.id}`);
+                              }
+                            }}
                           >
                             {item.type === "project" ? (
                               <FolderOpen className="h-3.5 w-3.5 text-blue-500 shrink-0" />
@@ -527,13 +525,11 @@ export function PortfolioTimeline() {
                                       width: barStyle.width,
                                       minWidth: "8px",
                                     }}
-                                    onClick={() =>
-                                      navigate(
-                                        item.type === "project"
-                                          ? `/projects/${item.id}`
-                                          : `/estimates/${item.id}`
-                                      )
-                                    }
+                                    onClick={() => {
+                                      if (item.type === "project") {
+                                        navigate(`/projects/${item.id}`);
+                                      }
+                                    }}
                                     data-testid={`timeline-bar-${item.type}-${item.id}`}
                                   >
                                     <div className="px-2 h-full flex items-center overflow-hidden">

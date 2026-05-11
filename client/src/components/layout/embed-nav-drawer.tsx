@@ -139,7 +139,6 @@ export function EmbedNavDrawer() {
                   <NavItem href="/projects"                icon={<FolderOpen />}    label="All Projects"         onClose={close} />
                   <NavItem href="/clients"                 icon={<Building2 />}     label="Clients"              onClose={close} />
                   <NavItem href="/resource-management"     icon={<Users />}         label="Resources"            onClose={close} />
-                  <NavItem href="/estimates"               icon={<FileText />}      label="Estimates"            onClose={close} />
                   {hasAnyRole(["admin", "pm", "portfolio-manager"]) && (
                     <NavItem href="/crm/deals"             icon={<Handshake />}     label="CRM Deals"            onClose={close} />
                   )}

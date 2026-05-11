@@ -9,8 +9,6 @@ import Projects from "@/pages/projects";
 import ProjectDetail from "@/pages/project-detail";
 import Clients from "@/pages/clients";
 import ClientDetail from "@/pages/client-detail";
-import Estimates from "@/pages/estimates";
-import EstimateDetail from "@/pages/estimate-detail";
 import TimeTracking from "@/pages/time-tracking";
 import Expenses from "@/pages/expenses";
 import ExpenseManagement from "@/pages/expense-management";
@@ -64,7 +62,6 @@ import AiSettings from "@/pages/ai-settings";
 import ExecutiveNarrative from "@/pages/executive-narrative";
 import M365IntegrationDiagram from "@/pages/m365-integration-diagram";
 import EmbedProject from "@/pages/embed-project";
-import EmbedEstimate from "@/pages/embed-estimate";
 import EmbedConfigure from "@/pages/embed-configure";
 import EmbedDashboard from "@/pages/embed-dashboard";
 import EmbedAuthPopup from "@/pages/embed-auth-popup";
@@ -197,7 +194,6 @@ function Router() {
       <Route path="/embed/configure" component={EmbedConfigure} />
       <Route path="/embed/dashboard" component={EmbedDashboard} />
       <Route path="/embed/projects/:id" component={EmbedProject} />
-      <Route path="/embed/estimates/:id" component={EmbedEstimate} />
       <Route path="/login" component={Login} />
       <Route path="/signup" component={Signup} />
       <Route path="/">
@@ -244,12 +240,6 @@ function Router() {
       </Route>
       <Route path="/clients/:id">
         {user ? <ClientDetail /> : <Redirect to="/login" />}
-      </Route>
-      <Route path="/estimates">
-        {user ? <Estimates /> : <Redirect to="/login" />}
-      </Route>
-      <Route path="/estimates/:id">
-        {user ? <EstimateDetail /> : <Redirect to="/login" />}
       </Route>
       <Route path="/time">
         {user ? <TimeTracking /> : <Redirect to="/login" />}

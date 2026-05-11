@@ -135,7 +135,7 @@ interface SectionRoute {
 
 const sectionRoutes: SectionRoute[] = [
   { sectionId: "my-workspace", paths: ["/my-dashboard", "/my-assignments", "/my-projects", "/time", "/expenses", "/expense-reports", "/my-reimbursements", "/my-contractor-invoices", "/my-raidd", "/notifications", "/notifications/preferences"] },
-  { sectionId: "portfolio", paths: ["/", "/dashboard", "/portfolio/timeline", "/portfolio/raidd", "/portfolio/schedule-health", "/reports", "/executive-narrative", "/projects", "/clients", "/resource-management", "/resource-planning", "/resource-planning/capacity", "/estimates", "/crm/deals"] },
+  { sectionId: "portfolio", paths: ["/", "/dashboard", "/portfolio/timeline", "/portfolio/raidd", "/portfolio/schedule-health", "/reports", "/executive-narrative", "/projects", "/clients", "/resource-management", "/resource-planning", "/resource-planning/capacity", "/crm/deals"] },
   { sectionId: "financial", paths: ["/billing", "/invoice-report", "/client-revenue-report", "/expense-management", "/expense-approval", "/approvals/time", "/reimbursement-batches", "/contractor-invoices", "/rates"] },
   { sectionId: "administration", paths: ["/users", "/organization-settings", "/system-settings", "/admin/scheduled-jobs", "/admin/agent-card-health", "/admin/background-jobs", "/file-repository", "/admin/sharepoint", "/m365-integration", "/vocabulary", "/ai-grounding", "/ai-settings"] },
   { sectionId: "platform", paths: ["/platform/tenants", "/platform/service-plans", "/platform/users", "/platform/airports", "/platform/oconus", "/platform/grounding-docs"] },
@@ -256,7 +256,6 @@ export function Sidebar() {
                 <SidebarItem href="/resource-management" icon={<Users />} label="Resources" />
                 <SidebarItem href="/resource-planning" icon={<GanttChart />} label="Resource Planning" requiredRoles={["admin", "pm", "portfolio-manager", "executive"]} />
                 <SidebarItem href="/resource-planning/capacity" icon={<TrendingUp />} label="Capacity Planning" requiredRoles={["admin", "pm", "portfolio-manager", "executive"]} />
-                <SidebarItem href="/estimates" icon={<FileText />} label="Estimates" />
                 <SubGroupLabel label="Pipeline" />
                 <SidebarItem href="/crm/deals" icon={<Handshake />} label="CRM Deals" requiredRoles={["admin", "pm", "portfolio-manager"]} />
               </CollapsibleSection>

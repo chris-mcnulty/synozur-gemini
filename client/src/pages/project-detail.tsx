@@ -3429,18 +3429,6 @@ export default function ProjectDetail() {
                   </p>
                 </div>
               </div>
-              <Link href="/estimates">
-                <Button
-                  variant="outline"
-                  size="sm"
-                  className="border-amber-300 dark:border-amber-800 bg-white dark:bg-transparent hover:bg-amber-100 dark:hover:bg-amber-900/40 shrink-0"
-                  data-testid="button-go-to-estimates"
-                >
-                  <FileText className="w-4 h-4 mr-2" />
-                  Go to Estimates
-                  <ExternalLink className="w-3 h-3 ml-2" />
-                </Button>
-              </Link>
             </div>
           );
         })()}

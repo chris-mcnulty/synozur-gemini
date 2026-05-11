@@ -190,9 +190,6 @@ export default function CrmDeals() {
       queryClient.invalidateQueries({ queryKey: ["/api/estimates"] });
       toast({ title: "Estimate created", description: "Estimate created and linked to deal successfully." });
       closeDialog();
-      if (data?.estimate?.id) {
-        navigate(`/estimates/${data.estimate.id}`);
-      }
     },
     onError: (error: Error) => {
       toast({ title: "Failed to create estimate", description: error.message, variant: "destructive" });
@@ -508,12 +505,9 @@ export default function CrmDeals() {
                             <div className="flex flex-col gap-1">
                               {deal.mappings.map((m) => (
                                 <div key={m.localObjectId} className="flex items-center gap-1.5">
-                                  <button
-                                    onClick={() => navigate(`/estimates/${m.localObjectId}`)}
-                                    className="text-xs text-primary hover:underline truncate max-w-[200px]"
-                                  >
+                                  <span className="text-xs truncate max-w-[200px]">
                                     {m.estimateName}
-                                  </button>
+                                  </span>
                                   <button
                                     onClick={() => unlinkEstimateMutation.mutate({ dealId: deal.id, estimateId: m.localObjectId })}
                                     className="text-muted-foreground hover:text-destructive shrink-0"
@@ -565,12 +559,9 @@ export default function CrmDeals() {
               <div className="space-y-1">
                 {selectedDeal.mappings.map((m) => (
                   <div key={m.localObjectId} className="flex items-center justify-between bg-muted/50 rounded px-3 py-1.5 text-sm">
-                    <button
-                      onClick={() => navigate(`/estimates/${m.localObjectId}`)}
-                      className="text-primary hover:underline truncate"
-                    >
+                    <span className="truncate">
                       {m.estimateName}
-                    </button>
+                    </span>
                     <Button
                       variant="ghost"
                       size="sm"

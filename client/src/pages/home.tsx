@@ -166,7 +166,7 @@ export default function Home() {
               <Button
                 size="lg"
                 variant="outline"
-                onClick={() => navigate("/estimates")}
+                onClick={() => navigate("/projects")}
                 className="border-white/30 text-white hover:bg-white/10 px-8 py-3 text-base font-semibold"
               >
                 View Estimates
@@ -265,7 +265,7 @@ export default function Home() {
                   ))}
                 </ul>
                 <Button
-                  onClick={() => navigate("/estimates")}
+                  onClick={() => navigate("/projects")}
                   className="bg-gradient-to-r from-violet-600 to-purple-600 hover:from-violet-700 hover:to-purple-700 text-white"
                 >
                   Explore Estimates
