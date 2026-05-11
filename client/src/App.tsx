@@ -197,7 +197,7 @@ function Router() {
       <Route path="/login" component={Login} />
       <Route path="/signup" component={Signup} />
       <Route path="/">
-        {user ? <Dashboard /> : <Redirect to="/login" />}
+        {user ? <Redirect to="/payroll" /> : <Redirect to="/login" />}
       </Route>
       <Route path="/dashboard">
         {user ? <Dashboard /> : <Redirect to="/login" />}

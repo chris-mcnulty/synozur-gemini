@@ -216,6 +216,26 @@ export function Sidebar() {
       <ScrollArea className="flex-1">
         <div className="px-4 py-2">
           <nav className="space-y-1">
+            {hasAnyRole(['admin', 'billing-admin']) && (
+              <CollapsibleSection
+                id="payroll"
+                title="Payroll (Gemini)"
+                isOpen={!!openSections["payroll"]}
+                onToggle={handleToggle}
+              >
+                <SubGroupLabel label="Overview" />
+                <SidebarItem href="/payroll" icon={<Wallet />} label="Payroll Dashboard" />
+                <SubGroupLabel label="People" />
+                <SidebarItem href="/payroll/employees" icon={<Users />} label="Employees" />
+                <SidebarItem href="/payroll/schedules" icon={<CalendarClock />} label="Pay Schedules" />
+                <SubGroupLabel label="Process" />
+                <SidebarItem href="/payroll/runs" icon={<Banknote />} label="Payroll Runs" />
+                <SubGroupLabel label="Accounting" />
+                <SidebarItem href="/payroll/gl" icon={<Calculator />} label="General Ledger" />
+                <SidebarItem href="/payroll/audit" icon={<ScrollText />} label="Audit Log" />
+              </CollapsibleSection>
+            )}
+
             <CollapsibleSection
               id="my-workspace"
               title="My Workspace"
@@ -321,25 +341,6 @@ export function Sidebar() {
               </CollapsibleSection>
             )}
             
-            {hasAnyRole(['admin', 'billing-admin']) && (
-              <CollapsibleSection
-                id="payroll"
-                title="Payroll (Gemini)"
-                isOpen={!!openSections["payroll"]}
-                onToggle={handleToggle}
-              >
-                <SubGroupLabel label="Overview" />
-                <SidebarItem href="/payroll" icon={<Wallet />} label="Payroll Dashboard" />
-                <SubGroupLabel label="People" />
-                <SidebarItem href="/payroll/employees" icon={<Users />} label="Employees" />
-                <SidebarItem href="/payroll/schedules" icon={<CalendarClock />} label="Pay Schedules" />
-                <SubGroupLabel label="Process" />
-                <SidebarItem href="/payroll/runs" icon={<Banknote />} label="Payroll Runs" />
-                <SubGroupLabel label="Accounting" />
-                <SidebarItem href="/payroll/gl" icon={<Calculator />} label="General Ledger" />
-                <SidebarItem href="/payroll/audit" icon={<ScrollText />} label="Audit Log" />
-              </CollapsibleSection>
-            )}
 
             {isPlatformAdmin && (
               <CollapsibleSection
