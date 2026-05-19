@@ -4551,6 +4551,11 @@ export const payrollRuns = pgTable("payroll_runs", {
   periodStart: date("period_start").notNull(),
   periodEnd: date("period_end").notNull(),
   payDate: date("pay_date").notNull(),
+  // 'regular' (default), 'bonus' (off-cycle), or 'reversal' (unwinds a prior
+  // finalized run; amounts on items are negative). Reversal runs link to the
+  // run they undo via `reverses_run_id` so the YTD calc can pick them up.
+  runType: varchar("run_type", { length: 16 }).notNull().default('regular'),
+  reversesRunId: varchar("reverses_run_id"),
   status: varchar("status", { length: 20 }).notNull().default('draft'),
   // Totals (cached for reporting; recomputed from items on preview).
   totalGrossCents: integer("total_gross_cents").notNull().default(0),

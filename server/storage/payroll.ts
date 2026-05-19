@@ -342,10 +342,15 @@ export const payrollStorage = {
   async previewRun(tenantId: string, runId: string, perEmployeeInputs?: Map<string, Partial<PayrollEngineInputs>>): Promise<{ run: PayrollRun; items: PayrollRunItem[] }> {
     const run = await this.getRun(tenantId, runId);
     if (!run) throw new Error('Run not found');
-    // Only draft and previewed runs may be (re)previewed. Once approved, the
-    // calculation must not change without explicit revert (TODO: add revert).
+    // Only draft and previewed runs may be (re)previewed.
     if (run.status !== 'draft' && run.status !== 'previewed') {
       throw new Error(`Cannot preview a ${run.status} run`);
+    }
+    // Reversal runs have their items pre-built (negated) and must not be
+    // recomputed against the engine — that would re-derive positive amounts
+    // and defeat the reversal. Approve/finalize them as-is.
+    if (run.runType === 'reversal') {
+      throw new Error('Reversal runs are pre-built and cannot be previewed; approve and finalize as-is');
     }
     if (!run.payScheduleId) throw new Error('Run has no pay schedule');
     const schedule = await this.getSchedule(tenantId, run.payScheduleId);
@@ -471,6 +476,64 @@ export const payrollStorage = {
     return row;
   },
 
+  /**
+   * Create a reversal run for a finalized run. Copies each item with the
+   * monetary fields negated so YTD accumulators net out, then leaves the
+   * reversal in 'draft' state for the admin to preview/approve/finalize
+   * just like any other run. The original finalized run is NOT modified —
+   * a reversal is additional history, never a delete.
+   */
+  async createReversalRun(tenantId: string, originalRunId: string, actorUserId: string): Promise<PayrollRun> {
+    const original = await this.getRun(tenantId, originalRunId);
+    if (!original) throw new Error('Run not found');
+    if (original.status !== 'finalized') {
+      throw new Error('Only finalized runs can be reversed; void earlier runs instead');
+    }
+    if (original.runType === 'reversal') {
+      throw new Error('A reversal cannot itself be reversed; create a regular correction run');
+    }
+    const [run] = await db.insert(payrollRuns).values({
+      tenantId,
+      payScheduleId: original.payScheduleId,
+      periodStart: original.periodStart,
+      periodEnd: original.periodEnd,
+      payDate: new Date().toISOString().slice(0, 10),
+      runType: 'reversal',
+      reversesRunId: original.id,
+      status: 'draft',
+      createdBy: actorUserId,
+      notes: `Reversal of run ${original.id}`,
+      totalGrossCents: -original.totalGrossCents,
+      totalEmployeeTaxCents: -original.totalEmployeeTaxCents,
+      totalEmployerTaxCents: -original.totalEmployerTaxCents,
+      totalDeductionsCents: -original.totalDeductionsCents,
+      totalNetCents: -original.totalNetCents,
+    } as any).returning();
+
+    const items = await this.listRunItems(tenantId, original.id);
+    if (items.length > 0) {
+      await db.insert(payrollRunItems).values(items.map(it => ({
+        tenantId,
+        runId: run.id,
+        employeeId: it.employeeId,
+        hoursWorked: String(-Number(it.hoursWorked ?? 0)),
+        overtimeHours: String(-Number(it.overtimeHours ?? 0)),
+        ptoHoursUsed: String(-Number(it.ptoHoursUsed ?? 0)),
+        bonusCents: -it.bonusCents,
+        commissionCents: -it.commissionCents,
+        retroPayCents: -it.retroPayCents,
+        grossCents: -it.grossCents,
+        employeeTaxCents: -it.employeeTaxCents,
+        employerTaxCents: -it.employerTaxCents,
+        preTaxDeductionCents: -it.preTaxDeductionCents,
+        postTaxDeductionCents: -it.postTaxDeductionCents,
+        netPayCents: -it.netPayCents,
+        breakdown: { reversalOf: original.id, original: it.breakdown },
+      })));
+    }
+    return run;
+  },
+
   async voidRun(tenantId: string, runId: string): Promise<PayrollRun> {
     const run = await this.getRun(tenantId, runId);
     if (!run) throw new Error('Run not found');
@@ -549,14 +612,26 @@ export const payrollStorage = {
       return accountById.get(m.glAccountId) || null;
     }
 
-    let wages = 0, employerTax = 0, employeeTax = 0, preTax = 0, postTax = 0, net = 0;
+    // Walk each item's breakdown to split garnishments out from generic
+    // post-tax deductions; the engine emits them with category='garnishment'.
+    let wages = 0, employerTax = 0, employeeTax = 0, preTax = 0;
+    let postTax = 0, garnishment = 0, net = 0;
     for (const it of items) {
       wages += it.grossCents;
       employerTax += it.employerTaxCents;
       employeeTax += it.employeeTaxCents;
       preTax += it.preTaxDeductionCents;
-      postTax += it.postTaxDeductionCents;
       net += it.netPayCents;
+      const lines = ((it.breakdown as any)?.lines ?? []) as Array<{ category: string; amountCents: number }>;
+      let itemGarnishment = 0;
+      for (const l of lines) {
+        if (l.category === 'garnishment') itemGarnishment += Math.abs(l.amountCents);
+      }
+      garnishment += itemGarnishment;
+      // post-tax stored on the item bundles garnishments; subtract them so
+      // post_tax_deduction GL only captures non-garnishment post-tax (Roth
+      // 401(k), union dues, etc.).
+      postTax += (it.postTaxDeductionCents - itemGarnishment);
     }
 
     const memo = `Payroll run ${run.id} pay date ${run.payDate}`;
@@ -570,11 +645,8 @@ export const payrollStorage = {
     push('employee_tax_liability', 0, employeeTax);
     push('pre_tax_deduction', 0, preTax);
     push('post_tax_deduction', 0, postTax);
-    // Garnishments roll into post-tax bucket in engine but expose a dedicated
-    // mapping slot so customers can route them to a separate liability acct.
-    push('garnishment_liability', 0, 0); // placeholder; see TODO to split bucket
+    push('garnishment_liability', 0, garnishment);
     push('net_pay_clearing', 0, net);
-    // Employer tax liability mirrors employer tax expense.
     push('employer_tax_liability', 0, employerTax);
     return out;
   },

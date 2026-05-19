@@ -332,6 +332,22 @@ export function registerPayrollRoutes(app: Express, deps: PayrollRouteDeps) {
     } catch (e: any) { res.status(400).json({ message: e.message }); }
   });
 
+  // Create a reversal run that unwinds a finalized run. Result is a fresh
+  // 'draft' run with negative items; admin still has to approve and finalize.
+  app.post('/api/payroll/runs/:id/reverse', requireAuth, PM, async (req, res) => {
+    try {
+      const tenantId = tenantOf(req);
+      const userId = (req.user as any)?.id;
+      const reversal = await payrollStorage.createReversalRun(tenantId, req.params.id, userId);
+      await payrollStorage.appendAudit({
+        tenantId, actorUserId: userId, action: 'run.reverse',
+        entityType: 'run', entityId: reversal.id,
+        details: { reversesRunId: req.params.id }, ipAddress: req.ip,
+      });
+      res.json(reversal);
+    } catch (e: any) { res.status(400).json({ message: e.message }); }
+  });
+
   app.post('/api/payroll/runs/:id/void', requireAuth, PM, async (req, res) => {
     try {
       const tenantId = tenantOf(req);
