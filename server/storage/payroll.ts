@@ -575,6 +575,58 @@ export const payrollStorage = {
     return out;
   },
 
+  // ---- Self-service: an employee's own finalized paystubs ----
+  /**
+   * Return finalized run items for an employee, joined with run metadata,
+   * newest first. Used by /api/me/payroll/paystubs.
+   */
+  async listPaystubsForEmployee(tenantId: string, employeeId: string) {
+    return db.select({
+      runId: payrollRuns.id,
+      periodStart: payrollRuns.periodStart,
+      periodEnd: payrollRuns.periodEnd,
+      payDate: payrollRuns.payDate,
+      status: payrollRuns.status,
+      grossCents: payrollRunItems.grossCents,
+      netPayCents: payrollRunItems.netPayCents,
+      employeeTaxCents: payrollRunItems.employeeTaxCents,
+      preTaxDeductionCents: payrollRunItems.preTaxDeductionCents,
+      postTaxDeductionCents: payrollRunItems.postTaxDeductionCents,
+      hoursWorked: payrollRunItems.hoursWorked,
+      overtimeHours: payrollRunItems.overtimeHours,
+    })
+      .from(payrollRunItems)
+      .innerJoin(payrollRuns, eq(payrollRunItems.runId, payrollRuns.id))
+      .where(and(
+        eq(payrollRunItems.tenantId, tenantId),
+        eq(payrollRunItems.employeeId, employeeId),
+        eq(payrollRuns.status, 'finalized'),
+      ))
+      .orderBy(desc(payrollRuns.payDate));
+  },
+
+  /**
+   * Full paystub detail (line items / breakdown) for a single finalized run.
+   * Returns null when the run isn't finalized or doesn't belong to the
+   * employee — we never expose draft/previewed payroll to employees.
+   */
+  async getPaystubForEmployee(tenantId: string, employeeId: string, runId: string) {
+    const [row] = await db.select({
+      run: payrollRuns,
+      item: payrollRunItems,
+    })
+      .from(payrollRunItems)
+      .innerJoin(payrollRuns, eq(payrollRunItems.runId, payrollRuns.id))
+      .where(and(
+        eq(payrollRunItems.tenantId, tenantId),
+        eq(payrollRunItems.employeeId, employeeId),
+        eq(payrollRunItems.runId, runId),
+        eq(payrollRuns.status, 'finalized'),
+      ));
+    if (!row) return null;
+    return { run: row.run, item: row.item };
+  },
+
   // ---- ACH originator (one row per tenant) ----
   async getAchOriginator(tenantId: string): Promise<PayrollAchOriginator | undefined> {
     const [row] = await db.select().from(payrollAchOriginator)

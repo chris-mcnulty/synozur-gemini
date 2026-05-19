@@ -457,6 +457,34 @@ export function registerPayrollRoutes(app: Express, deps: PayrollRouteDeps) {
     } catch (e: any) { res.status(500).json({ message: e.message }); }
   });
 
+  // ---- Self-service: an employee can see their own finalized paystubs ----
+  // No PAYROLL_MANAGER gate — any authenticated user with a linked payroll
+  // record can see their own pay history. Tenant is derived from the session
+  // and the only employees returned are those where payrollEmployees.userId
+  // matches the requester. There is no path to view another person's data.
+  app.get('/api/me/payroll/paystubs', requireAuth, async (req, res) => {
+    try {
+      const tenantId = tenantOf(req);
+      const userId = (req.user as any).id;
+      const emp = await payrollStorage.findEmployeeByUserId(tenantId, userId);
+      if (!emp) return res.json({ employee: null, paystubs: [] });
+      const paystubs = await payrollStorage.listPaystubsForEmployee(tenantId, emp.id);
+      res.json({ employee: { id: emp.id, employeeType: emp.employeeType, status: emp.status }, paystubs });
+    } catch (e: any) { res.status(500).json({ message: e.message }); }
+  });
+
+  app.get('/api/me/payroll/paystubs/:runId', requireAuth, async (req, res) => {
+    try {
+      const tenantId = tenantOf(req);
+      const userId = (req.user as any).id;
+      const emp = await payrollStorage.findEmployeeByUserId(tenantId, userId);
+      if (!emp) return res.status(404).json({ message: 'You are not enrolled in payroll' });
+      const detail = await payrollStorage.getPaystubForEmployee(tenantId, emp.id, req.params.runId);
+      if (!detail) return res.status(404).json({ message: 'Paystub not found' });
+      res.json(detail);
+    } catch (e: any) { res.status(500).json({ message: e.message }); }
+  });
+
   // ---- Audit Log ----
   app.get('/api/payroll/audit-log', requireAuth, requireRole(PAYROLL_MANAGER), async (req, res) => {
     try { res.json(await payrollStorage.listAudit(tenantOf(req), Number(req.query.limit) || 200)); }
