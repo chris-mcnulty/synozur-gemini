@@ -4486,6 +4486,13 @@ export const payrollDeductions = pgTable("payroll_deductions", {
   employerMatchCents: integer("employer_match_cents"),
   employerMatchPercent: decimal("employer_match_percent", { precision: 6, scale: 4 }),
   glAccountId: varchar("gl_account_id"),
+  // Tax scope of the pre-tax deduction (only used when deductionType='pre_tax'):
+  //   'all'           = Section 125 cafeteria (health/HSA/FSA) - exempt from
+  //                     federal income tax AND FICA AND FUTA
+  //   'federal_only'  = 401(k) traditional - exempt from federal income tax
+  //                     only; FICA + FUTA still apply
+  // Pre-existing rows are backfilled to 'all' (the engine's prior behaviour).
+  preTaxScope: varchar("pre_tax_scope", { length: 20 }).default('federal_only'),
   effectiveFrom: date("effective_from").notNull(),
   effectiveTo: date("effective_to"),
   isActive: boolean("is_active").notNull().default(true),

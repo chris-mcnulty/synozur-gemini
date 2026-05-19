@@ -17,7 +17,7 @@ export default function PayrollEmployeeDetail() {
   const { toast } = useToast();
   const { data, isLoading } = useQuery<any>({ queryKey: ["/api/payroll/employees", id] });
   const [comp, setComp] = useState<any>({ compType: 'salary', amountCents: 0, effectiveFrom: new Date().toISOString().slice(0, 10) });
-  const [ded, setDed] = useState<any>({ deductionType: 'pre_tax', name: '', amountCents: 0, effectiveFrom: new Date().toISOString().slice(0, 10), isActive: true });
+  const [ded, setDed] = useState<any>({ deductionType: 'pre_tax', preTaxScope: 'federal_only', name: '', amountCents: 0, effectiveFrom: new Date().toISOString().slice(0, 10), isActive: true });
 
   const addComp = useMutation({
     mutationFn: (body: any) => apiRequest(`/api/payroll/employees/${id}/compensation`, { method: "POST", body: JSON.stringify(body) }),
@@ -194,7 +194,7 @@ export default function PayrollEmployeeDetail() {
                 ))}
               </tbody>
             </table>
-            <div className="grid grid-cols-5 gap-3 items-end pt-3 border-t">
+            <div className="grid grid-cols-6 gap-3 items-end pt-3 border-t">
               <div><Label>Name</Label><Input value={ded.name} onChange={ev => setDed({ ...ded, name: ev.target.value })} /></div>
               <div><Label>Type</Label>
                 <Select value={ded.deductionType} onValueChange={v => setDed({ ...ded, deductionType: v })}>
@@ -207,6 +207,17 @@ export default function PayrollEmployeeDetail() {
                   </SelectContent>
                 </Select>
               </div>
+              {ded.deductionType === 'pre_tax' && (
+                <div><Label>Tax wrapper</Label>
+                  <Select value={ded.preTaxScope} onValueChange={v => setDed({ ...ded, preTaxScope: v })}>
+                    <SelectTrigger><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="all">Section 125 (health/HSA/FSA)</SelectItem>
+                      <SelectItem value="federal_only">401(k) traditional (FICA-taxable)</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+              )}
               <div><Label>Amount (USD)</Label><Input type="number" step="0.01" onChange={ev => setDed({ ...ded, amountCents: ev.target.value ? Math.round(Number(ev.target.value) * 100) : null })} /></div>
               <div><Label>% gross</Label><Input type="number" step="0.01" onChange={ev => setDed({ ...ded, percentOfGross: ev.target.value || null })} /></div>
               <div><Button onClick={() => addDed.mutate(ded)} disabled={addDed.isPending || !ded.name}>Add</Button></div>

@@ -102,6 +102,16 @@ const FED_BRACKETS_HOH: Bracket[] = [
   { upToCents: null,     ratePct: 37, baseCents: 18195100 },
 ];
 
+// 2024 standard deductions (cents). Subtracted from annual wages before
+// applying the income-tax brackets, matching IRS Pub 15-T Worksheet 1A.
+// When W-4 Step 2(c) (multiple jobs / spouse works) is checked, only half
+// the standard deduction applies because both jobs are sharing it.
+const STD_DEDUCTION_CENTS: Record<string, number> = {
+  single: 1460000,
+  married_jointly: 2920000,
+  head_of_household: 2190000,
+};
+
 // Social Security: 6.2% employee + 6.2% employer, wage base 2024 = $168,600.
 const SS_RATE_PCT = 6.2;
 const SS_WAGE_BASE_CENTS = 16860000;
@@ -180,20 +190,39 @@ export function computePayroll(inp: PayrollEngineInputs): PayrollEngineResult {
     };
   }
 
-  // Pre-tax deductions reduce taxable wages (e.g., 401k, HSA, pre-tax health).
-  let preTaxCents = 0;
+  // Pre-tax deductions reduce taxable wages, but the SCOPE depends on the
+  // tax wrapper. Section 125 cafeteria deductions (preTaxScope='all') are
+  // exempt from federal income tax + FICA + FUTA. 401(k) traditional
+  // (preTaxScope='federal_only') is exempt from federal income tax only;
+  // FICA and FUTA still tax the deferral. We track both buckets so the
+  // FICA wage base is computed correctly.
+  let preTaxAllCents = 0;       // exempt from everything
+  let preTaxFedOnlyCents = 0;   // exempt from federal income tax only
   for (const d of inp.deductions.filter(x => x.isActive && x.deductionType === 'pre_tax')) {
     const amt = d.amountCents ?? (d.percentOfGross ? pctOfCents(grossCents, Number(d.percentOfGross)) : 0);
     if (amt > 0) {
-      preTaxCents += amt;
+      // Default to 'all' for back-compat with rows that predate preTaxScope.
+      const scope = (d as any).preTaxScope ?? 'all';
+      if (scope === 'all') preTaxAllCents += amt;
+      else preTaxFedOnlyCents += amt;
       lines.push({ category: 'pre_tax_deduction', label: d.name, amountCents: -amt });
     }
   }
-  const taxableWages = Math.max(0, grossCents - preTaxCents);
+  const preTaxCents = preTaxAllCents + preTaxFedOnlyCents;
+  const federalTaxableWages = Math.max(0, grossCents - preTaxAllCents - preTaxFedOnlyCents);
+  const ficaTaxableWages = Math.max(0, grossCents - preTaxAllCents);
 
   // ---- Federal income tax withholding (annualized brackets) ----
   const periods = PERIODS_PER_YEAR[inp.schedule.frequency] ?? 26;
-  const annualTaxable = taxableWages * periods - (inp.employee.w4DeductionsCents ?? 0);
+  // Subtract the standard deduction for the filing status (halved when the
+  // W-4 Step 2(c) multi-jobs checkbox is set — per IRS Pub 15-T).
+  const stdDed = STD_DEDUCTION_CENTS[inp.employee.filingStatus ?? 'single'] ?? STD_DEDUCTION_CENTS.single;
+  const effectiveStdDed = inp.employee.w4MultipleJobs ? Math.round(stdDed / 2) : stdDed;
+  const annualWages = federalTaxableWages * periods + (inp.employee.w4OtherIncomeCents ?? 0);
+  const annualTaxable = Math.max(
+    0,
+    annualWages - effectiveStdDed - (inp.employee.w4DeductionsCents ?? 0),
+  );
   const brackets = inp.employee.filingStatus === 'married_jointly' ? FED_BRACKETS_MARRIED
     : inp.employee.filingStatus === 'head_of_household' ? FED_BRACKETS_HOH
     : FED_BRACKETS_SINGLE;
@@ -202,20 +231,18 @@ export function computePayroll(inp: PayrollEngineInputs): PayrollEngineResult {
   if (fedWithholding > 0) lines.push({ category: 'employee_tax', label: 'Federal income tax', amountCents: -fedWithholding });
 
   // ---- FICA: Social Security + Medicare (employee side) ----
-  // Use true YTD accumulators for the SS wage base cap and additional Medicare
-  // threshold. Per-period approximations produce wrong totals mid-year when
-  // wages vary or when bonuses push an employee over a cap.
+  // FICA wage base = gross minus Section 125 only (401(k) deferrals still
+  // get FICA-taxed). YTD caps prevent double-charging when an employee
+  // crosses a threshold mid-year.
   const ytdSs = inp.ytdSsWagesCents ?? 0;
   const ssRemaining = Math.max(0, SS_WAGE_BASE_CENTS - ytdSs);
-  const ssWages = Math.min(taxableWages, ssRemaining);
+  const ssWages = Math.min(ficaTaxableWages, ssRemaining);
   const employeeSS = pctOfCents(ssWages, SS_RATE_PCT);
-  const employeeMedicare = pctOfCents(taxableWages, MEDICARE_RATE_PCT);
+  const employeeMedicare = pctOfCents(ficaTaxableWages, MEDICARE_RATE_PCT);
   const ytdMedicare = inp.ytdMedicareWagesCents ?? 0;
-  const newMedicareYtd = ytdMedicare + taxableWages;
-  // Additional Medicare 0.9% applies only on wages above $200k YTD; charge
-  // the surtax only on the portion of this period that crosses the threshold.
+  const newMedicareYtd = ytdMedicare + ficaTaxableWages;
   const addlMedicareWages = newMedicareYtd > MEDICARE_ADDL_THRESHOLD_CENTS
-    ? Math.min(taxableWages, newMedicareYtd - MEDICARE_ADDL_THRESHOLD_CENTS)
+    ? Math.min(ficaTaxableWages, newMedicareYtd - MEDICARE_ADDL_THRESHOLD_CENTS)
     : 0;
   const employeeAddlMedicare = addlMedicareWages > 0
     ? pctOfCents(addlMedicareWages, MEDICARE_ADDL_RATE_PCT)
@@ -224,40 +251,65 @@ export function computePayroll(inp: PayrollEngineInputs): PayrollEngineResult {
   if (employeeMedicare) lines.push({ category: 'employee_tax', label: 'Medicare', amountCents: -employeeMedicare });
   if (employeeAddlMedicare) lines.push({ category: 'employee_tax', label: 'Add’l Medicare', amountCents: -employeeAddlMedicare });
 
-  // ---- State / local tax (rule-driven, stubbed) ----
+  // ---- State / local tax (rule-driven; flat + brackets) ----
+  // State withholding bases on the federal taxable wage base, since most
+  // states piggy-back on federal AGI conventions (CA, NY, etc.).
   let stateLocalEmployeeTax = 0;
   for (const j of inp.jurisdictions.filter(x => x.isActive && (x.level === 'state' || x.level === 'local'))) {
     const rule = j.rule || {};
     if (rule.kind === 'flat_percent' && typeof rule.employeePct === 'number') {
-      const t = pctOfCents(taxableWages, rule.employeePct);
+      const t = pctOfCents(federalTaxableWages, rule.employeePct);
       if (t > 0) {
         stateLocalEmployeeTax += t;
         lines.push({ category: 'employee_tax', label: `${j.name} (${j.code})`, amountCents: -t });
       }
+    } else if (rule.kind === 'brackets' && Array.isArray(rule.brackets)) {
+      // Bracket-based: rule.brackets is [{upToCents, ratePct, baseCents}, ...]
+      // annualized; rule.stdDeductionCents optionally subtracted first.
+      const annual = federalTaxableWages * periods - (rule.stdDeductionCents ?? 0);
+      const annualState = applyBrackets(Math.max(0, annual), rule.brackets as Bracket[]);
+      const periodState = Math.round(annualState / periods);
+      if (periodState > 0) {
+        stateLocalEmployeeTax += periodState;
+        lines.push({ category: 'employee_tax', label: `${j.name} (${j.code})`, amountCents: -periodState });
+      }
     }
-    // TODO: implement bracket-based state withholding (CA DE-4, NY IT-2104, etc.)
-    // TODO: implement local taxes (NYC, Philadelphia BIRT, school district taxes)
   }
 
   const employeeTaxCents = fedWithholding + employeeSS + employeeMedicare + employeeAddlMedicare + stateLocalEmployeeTax;
 
   // ---- Employer-side taxes (do not reduce net pay; tracked for liability/GL) ----
   const employerSS = pctOfCents(ssWages, SS_RATE_PCT);
-  const employerMedicare = pctOfCents(taxableWages, MEDICARE_RATE_PCT);
-  // FUTA: 6% on first $7,000 wages per employee per year, but most employers
-  // get the 5.4% state credit → 0.6%. Apply against true YTD, not per-period.
+  const employerMedicare = pctOfCents(ficaTaxableWages, MEDICARE_RATE_PCT);
+  // FUTA: 6% on first $7,000 wages per employee per year (less 5.4% state
+  // credit = 0.6%). Wage base same as FICA — Section 125 exempt, 401(k) not.
   const ytdFuta = inp.ytdFutaWagesCents ?? 0;
   const futaRemaining = Math.max(0, 700000 - ytdFuta);
-  const futa = pctOfCents(Math.min(taxableWages, futaRemaining), 0.6);
+  const futa = pctOfCents(Math.min(ficaTaxableWages, futaRemaining), 0.6);
+  // SUTA per state: rule.kind='suta', rule.ratePct, rule.wageBaseCents.
+  // Employer-only. Track YTD against the state's wage base.
+  let suta = 0;
+  for (const j of inp.jurisdictions.filter(x => x.isActive && x.level === 'state')) {
+    const rule = j.rule || {};
+    if (rule.kind === 'suta' && typeof rule.ratePct === 'number' && typeof rule.wageBaseCents === 'number') {
+      const remaining = Math.max(0, rule.wageBaseCents - ytdFuta); // approximate: re-uses FUTA YTD
+      const sutaWages = Math.min(ficaTaxableWages, remaining);
+      const t = pctOfCents(sutaWages, rule.ratePct);
+      if (t > 0) {
+        suta += t;
+        lines.push({ category: 'employer_tax', label: `${j.name} SUTA`, amountCents: t });
+      }
+    }
+  }
   // TODO: state unemployment (SUTA) by jurisdiction.
   let employerStateLocal = 0;
   for (const j of inp.jurisdictions.filter(x => x.isActive)) {
     const rule = j.rule || {};
     if (rule.kind === 'flat_percent' && typeof rule.employerPct === 'number') {
-      employerStateLocal += pctOfCents(taxableWages, rule.employerPct);
+      employerStateLocal += pctOfCents(ficaTaxableWages, rule.employerPct);
     }
   }
-  const employerTaxCents = employerSS + employerMedicare + futa + employerStateLocal;
+  const employerTaxCents = employerSS + employerMedicare + futa + suta + employerStateLocal;
   if (employerSS) lines.push({ category: 'employer_tax', label: 'Employer SS', amountCents: employerSS });
   if (employerMedicare) lines.push({ category: 'employer_tax', label: 'Employer Medicare', amountCents: employerMedicare });
   if (futa) lines.push({ category: 'employer_tax', label: 'FUTA', amountCents: futa });
@@ -287,7 +339,7 @@ export function computePayroll(inp: PayrollEngineInputs): PayrollEngineResult {
   return {
     grossCents,
     preTaxDeductionCents: preTaxCents,
-    taxableWagesCents: taxableWages,
+    taxableWagesCents: federalTaxableWages,
     employeeTaxCents,
     employerTaxCents,
     postTaxDeductionCents: postTaxCents,
