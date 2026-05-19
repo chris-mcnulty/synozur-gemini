@@ -19,6 +19,7 @@ import type {
   PayrollPaySchedule,
   PayrollTaxJurisdiction,
 } from "@shared/schema";
+import { resolveWithholdingState } from "./reciprocity";
 
 export interface PayrollEngineInputs {
   employee: PayrollEmployee;
@@ -254,8 +255,25 @@ export function computePayroll(inp: PayrollEngineInputs): PayrollEngineResult {
   // ---- State / local tax (rule-driven; flat + brackets) ----
   // State withholding bases on the federal taxable wage base, since most
   // states piggy-back on federal AGI conventions (CA, NY, etc.).
+  //
+  // Reciprocity: when an employee lives in one state and works in another,
+  // apply the resolved state (home if reciprocity exists, work otherwise).
+  // Locals (NYC, Philly) follow the work state irrespective of reciprocity
+  // because municipal taxes are jurisdictional, not residency-based.
+  const withholdingState = resolveWithholdingState(inp.employee.homeStateCode, inp.employee.workStateCode);
   let stateLocalEmployeeTax = 0;
   for (const j of inp.jurisdictions.filter(x => x.isActive && (x.level === 'state' || x.level === 'local'))) {
+    if (j.level === 'state' && withholdingState) {
+      // jurisdiction codes follow "US-CA", "US-NY", etc.
+      const expected = `US-${withholdingState}`;
+      if (j.code !== expected) continue;
+    }
+    if (j.level === 'local' && inp.employee.workStateCode) {
+      // Apply locals only when the work state matches the local's parent
+      // state (encoded as rule.parentState).
+      const parent = (j.rule as any)?.parentState;
+      if (parent && parent !== inp.employee.workStateCode) continue;
+    }
     const rule = j.rule || {};
     if (rule.kind === 'flat_percent' && typeof rule.employeePct === 'number') {
       const t = pctOfCents(federalTaxableWages, rule.employeePct);
