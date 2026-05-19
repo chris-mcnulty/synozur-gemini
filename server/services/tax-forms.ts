@@ -12,9 +12,28 @@
  */
 
 const usd = (cents: number) => (cents / 100).toFixed(2);
+
+// Neutralize CSV cells against spreadsheet formula injection. Excel and
+// Google Sheets treat values starting with =, +, -, @, or a leading TAB/CR
+// as formulas. Prefixing with a single apostrophe (which the spreadsheet
+// strips on render) defangs them while keeping the visible text intact.
 const csvEsc = (v: any) => {
-  const s = v == null ? '' : String(v);
+  let s = v == null ? '' : String(v);
+  if (s.length > 0 && /^[=+\-@\t\r]/.test(s)) s = "'" + s;
   return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+};
+
+// HTML-escape a value before interpolating it into the 941 template so
+// tenant-supplied data (name, EIN) can't inject markup or scripts into
+// the printable form opened in an admin's browser.
+const htmlEsc = (v: any) => {
+  const s = v == null ? '' : String(v);
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 };
 
 export interface TaxTotalsInput {
@@ -78,8 +97,10 @@ export function render941Html(opts: {
   const medicareTaxTotal = Math.round(totals.medicareWagesCents * 0.029);
   const totalTaxes = totals.fedIncomeTaxWithheldCents + ssTaxTotal + medicareTaxTotal;
 
+  const safeTenant = htmlEsc(tenantName);
+  const safeEin = ein ? htmlEsc(ein) : '';
   return `<!doctype html>
-<html><head><meta charset="utf-8"><title>Form 941 ${year} Q${quarter} — ${tenantName}</title>
+<html><head><meta charset="utf-8"><title>Form 941 ${year} Q${quarter} — ${safeTenant}</title>
 <style>
   @page { size: letter; margin: 0.5in; }
   body { font-family: 'Avenir Next LT Pro', Arial, sans-serif; font-size: 11pt; color: #111; }
@@ -96,7 +117,7 @@ export function render941Html(opts: {
 </style></head>
 <body>
   <h1>Form 941 — Employer's Quarterly Federal Tax Return</h1>
-  <div class="meta">${tenantName}${ein ? ` · EIN ${ein}` : ''} · ${year} Quarter ${quarter}</div>
+  <div class="meta">${safeTenant}${safeEin ? ` · EIN ${safeEin}` : ''} · ${year} Quarter ${quarter}</div>
 
   <table class="lines">
     <tr><th>Line</th><th>Description</th><th class="num">Amount</th></tr>
@@ -115,7 +136,7 @@ export function render941Html(opts: {
   <h2 style="font-size:13pt;margin-top:24px">Schedule B — Daily Tax Liability</h2>
   <table class="schb">
     <tr><th>Pay date</th><th class="num">Liability</th></tr>
-    ${scheduleB.map(d => `<tr><td>${d.date}</td><td class="num">$${usd(d.liabilityCents)}</td></tr>`).join('')}
+    ${scheduleB.map(d => `<tr><td>${htmlEsc(d.date)}</td><td class="num">$${usd(d.liabilityCents)}</td></tr>`).join('')}
     <tr class="totals"><td>Quarter total</td><td class="num">$${usd(scheduleB.reduce((s, d) => s + d.liabilityCents, 0))}</td></tr>
   </table>
   ` : ''}

@@ -266,14 +266,18 @@ export function computePayroll(inp: PayrollEngineInputs): PayrollEngineResult {
   const withholdingState = resolveWithholdingState(inp.employee.homeStateCode, inp.employee.workStateCode);
   let stateLocalEmployeeTax = 0;
   for (const j of inp.jurisdictions.filter(x => x.isActive && (x.level === 'state' || x.level === 'local'))) {
-    if (j.level === 'state' && withholdingState) {
-      // jurisdiction codes follow "US-CA", "US-NY", etc.
-      const expected = `US-${withholdingState}`;
-      if (j.code !== expected) continue;
+    if (j.level === 'state') {
+      // No resolved state means no state tax applies. This guards against
+      // accidentally applying every active state jurisdiction to an employee
+      // whose home + work states are both blank.
+      if (!withholdingState) continue;
+      if (j.code !== `US-${withholdingState}`) continue;
     }
-    if (j.level === 'local' && inp.employee.workStateCode) {
-      // Apply locals only when the work state matches the local's parent
-      // state (encoded as rule.parentState).
+    if (j.level === 'local') {
+      // Locals require a work state (municipal taxes are jurisdictional,
+      // not residency-based). Without one we skip locals entirely so
+      // an unspecified-location employee doesn't pick up NYC/Philly tax.
+      if (!inp.employee.workStateCode) continue;
       const parent = (j.rule as any)?.parentState;
       if (parent && parent !== inp.employee.workStateCode) continue;
     }
@@ -308,17 +312,22 @@ export function computePayroll(inp: PayrollEngineInputs): PayrollEngineResult {
   const futaRemaining = Math.max(0, 700000 - ytdFuta);
   const futa = pctOfCents(Math.min(ficaTaxableWages, futaRemaining), 0.6);
   // SUTA per state: rule.kind='suta', rule.ratePct, rule.wageBaseCents.
-  // Employer-only. Track YTD against the state's wage base.
+  // Employer-only and ONLY for the employee's work state — otherwise a
+  // single worker would be charged every seeded state's unemployment
+  // (e.g., both CA and NY SUTA at once).
   let suta = 0;
-  for (const j of inp.jurisdictions.filter(x => x.isActive && x.level === 'state')) {
-    const rule = j.rule || {};
-    if (rule.kind === 'suta' && typeof rule.ratePct === 'number' && typeof rule.wageBaseCents === 'number') {
-      const remaining = Math.max(0, rule.wageBaseCents - ytdFuta); // approximate: re-uses FUTA YTD
-      const sutaWages = Math.min(ficaTaxableWages, remaining);
-      const t = pctOfCents(sutaWages, rule.ratePct);
-      if (t > 0) {
-        suta += t;
-        lines.push({ category: 'employer_tax', label: `${j.name} SUTA`, amountCents: t });
+  if (inp.employee.workStateCode) {
+    const expectedSutaCode = `SUTA-${inp.employee.workStateCode}`;
+    for (const j of inp.jurisdictions.filter(x => x.isActive && x.level === 'state' && x.code === expectedSutaCode)) {
+      const rule = j.rule || {};
+      if (rule.kind === 'suta' && typeof rule.ratePct === 'number' && typeof rule.wageBaseCents === 'number') {
+        const remaining = Math.max(0, rule.wageBaseCents - ytdFuta); // approximate: re-uses FUTA YTD
+        const sutaWages = Math.min(ficaTaxableWages, remaining);
+        const t = pctOfCents(sutaWages, rule.ratePct);
+        if (t > 0) {
+          suta += t;
+          lines.push({ category: 'employer_tax', label: `${j.name} SUTA`, amountCents: t });
+        }
       }
     }
   }

@@ -4398,7 +4398,12 @@ export const payrollEmployees = pgTable("payroll_employees", {
   // accountNumberEnc encrypted at rest — this column currently holds plain
   // text for the stubbed implementation. Routing is the 9-digit ABA number.
   bankRoutingNumber: varchar("bank_routing_number", { length: 9 }),
-  bankAccountNumberEnc: varchar("bank_account_number_enc", { length: 64 }),
+  // AES-256-GCM ciphertext envelope formatted as
+  //   v1:<iv-b64(16)>:<tag-b64(24)>:<ciphertext-b64(...)>
+  // For a 17-digit account number the envelope is ~70 characters; longer
+  // account numbers (some international) plus future version prefixes
+  // need room to grow. 256 chars covers the foreseeable maximum.
+  bankAccountNumberEnc: varchar("bank_account_number_enc", { length: 256 }),
   bankAccountType: varchar("bank_account_type", { length: 16 }), // 'checking' | 'savings'
   // Soft delete for compliance
   deletedAt: timestamp("deleted_at"),

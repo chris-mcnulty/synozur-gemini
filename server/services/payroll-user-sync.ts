@@ -36,20 +36,28 @@ export async function findLinkedEmployee(tenantId: string, userId: string) {
 }
 
 /**
- * Reconcile a user's payroll enrollment.
+ * Reconcile a user's payroll enrollment within a SPECIFIC tenant.
  *
  * - When `payrollEmployeeType` is set and no active linked employee exists,
- *   create one (or revive a terminated one by reusing it).
+ *   create one (or rehire a previously-terminated one by clearing the
+ *   termination date and restoring status='onboarding').
  * - When `payrollEmployeeType` is null and a linked active employee exists,
- *   mark it terminated (status='terminated', terminationDate=today). We do not
- *   soft-delete — that would hide the employee from payroll history.
+ *   mark it terminated (status='terminated', terminationDate=today). We do
+ *   not soft-delete — that would hide the employee from payroll history.
  * - When the type changes (w2 ↔ 1099), update the linked employee in place.
+ *
+ * Tenant resolution: the caller MUST pass the request's tenant context
+ * (typically `currentUser.activeTenantId || currentUser.tenantId`). The
+ * user's `primaryTenantId` is only used as a fallback when the caller
+ * doesn't have a tenant on the request — multi-tenant users could
+ * otherwise mutate the wrong tenant's payroll record.
  */
 export async function syncUserPayrollEnrollment(
   user: User,
   actorUserId: string | undefined,
+  tenantIdFromRequest?: string,
 ): Promise<{ linkedEmployeeId: string | null }> {
-  const tenantId = user.primaryTenantId;
+  const tenantId = tenantIdFromRequest || user.primaryTenantId;
   if (!tenantId) return { linkedEmployeeId: null };
 
   const type = (user.payrollEmployeeType as PayrollEmployeeType | null) || null;
@@ -61,16 +69,24 @@ export async function syncUserPayrollEnrollment(
     }
     const { firstName, lastName } = nameParts(user);
     if (existing) {
-      if (existing.employeeType !== type) {
-        const updated = await payrollStorage.updateEmployee(tenantId, existing.id, {
-          employeeType: type,
-          email: user.email,
-          firstName, lastName,
-        });
+      // Build a patch so we only write what's actually changing.
+      const patch: Record<string, any> = {};
+      if (existing.employeeType !== type) patch.employeeType = type;
+      // Rehire path: a previously-terminated employee re-enrolls.
+      if (existing.status === 'terminated') {
+        patch.status = 'onboarding';
+        patch.terminationDate = null;
+      }
+      if (existing.email !== user.email) patch.email = user.email;
+      if (existing.firstName !== firstName) patch.firstName = firstName;
+      if (existing.lastName !== lastName) patch.lastName = lastName;
+      if (Object.keys(patch).length > 0) {
+        const updated = await payrollStorage.updateEmployee(tenantId, existing.id, patch as any);
         await payrollStorage.appendAudit({
           tenantId, actorUserId,
-          action: 'employee.type_change', entityType: 'employee', entityId: updated.id,
-          details: { from: existing.employeeType, to: type, viaUserSync: true, userId: user.id },
+          action: patch.status === 'onboarding' ? 'employee.rehire' : 'employee.update',
+          entityType: 'employee', entityId: updated.id,
+          details: { patch, viaUserSync: true, userId: user.id },
         });
       }
       return { linkedEmployeeId: existing.id };

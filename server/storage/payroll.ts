@@ -936,15 +936,22 @@ export const payrollStorage = {
       const fed = lines.filter((l: any) => l.label === 'Federal income tax').reduce((s: number, l: any) => s + Math.abs(l.amountCents), 0);
       const taxableWages = r.grossCents - r.preTaxDeductionCents;
       const ssLine = lines.find((l: any) => l.label === 'Social Security');
-      const medicareLine = lines.find((l: any) => l.label === 'Medicare');
       const employerSs = lines.filter((l: any) => l.label === 'Employer SS').reduce((s: number, l: any) => s + l.amountCents, 0);
       const employerMc = lines.filter((l: any) => l.label === 'Employer Medicare').reduce((s: number, l: any) => s + l.amountCents, 0);
 
-      fedIncomeWithheld += fed;
-      ssWagesTotal += ssLine ? Math.round(Math.abs(ssLine.amountCents) / 0.062) : 0;
-      medicareWagesTotal += taxableWages;
-      employerSsTotal += employerSs;
-      employerMedicareTotal += employerMc;
+      // Aggregate totals (drive 941 + W-2/W-3) MUST exclude 1099 contractors.
+      // 1099 pay is not subject to federal income tax withholding or FICA, so
+      // including it would overstate Form 941 line 2 and W-3 Box 5 Medicare
+      // wages. 1099 totals are still surfaced per-recipient via form1099Recipients
+      // for 1099-NEC filing.
+      const isW2 = r.employeeType === 'w2';
+      if (isW2) {
+        fedIncomeWithheld += fed;
+        ssWagesTotal += ssLine ? Math.round(Math.abs(ssLine.amountCents) / 0.062) : 0;
+        medicareWagesTotal += taxableWages;
+        employerSsTotal += employerSs;
+        employerMedicareTotal += employerMc;
+      }
 
       const e = byEmployee.get(r.employeeId) ?? {
         employeeId: r.employeeId, name: `${r.firstName} ${r.lastName}`, email: r.email,
@@ -953,10 +960,14 @@ export const payrollStorage = {
         ssWagesCents: 0, medicareWagesCents: 0, netPayCents: 0,
       };
       e.grossCents += r.grossCents;
-      e.taxableWagesCents += taxableWages;
-      e.fedIncomeTaxCents += fed;
-      e.ssWagesCents += ssLine ? Math.round(Math.abs(ssLine.amountCents) / 0.062) : 0;
-      e.medicareWagesCents += taxableWages;
+      // Per-employee W-2 fields stay zero for 1099 rows so the W-2 CSV
+      // export doesn't surface withholding/FICA columns for contractors.
+      if (isW2) {
+        e.taxableWagesCents += taxableWages;
+        e.fedIncomeTaxCents += fed;
+        e.ssWagesCents += ssLine ? Math.round(Math.abs(ssLine.amountCents) / 0.062) : 0;
+        e.medicareWagesCents += taxableWages;
+      }
       e.netPayCents += r.netPayCents;
       byEmployee.set(r.employeeId, e);
     }

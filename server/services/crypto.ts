@@ -16,9 +16,11 @@
  * Operational notes:
  *   - Generate a key with: `openssl rand -base64 32` and set it as
  *     PAYROLL_ENCRYPTION_KEY in the runtime environment.
- *   - Without the env var, encryption is disabled (values pass through).
- *     `encryptString` logs a one-line warning on first use so deployments
- *     don't silently regress to plain text without an operator knowing.
+ *   - Without the env var, encryption is MANDATORY for new writes:
+ *     `encryptString` throws so the API call fails closed instead of
+ *     silently persisting plain text. Decryption of legacy plain-text
+ *     rows still succeeds (they round-trip as-is), so existing data is
+ *     readable while the key is being provisioned.
  *   - Never log decrypted account numbers. Mask to last 4 in any audit/UI.
  */
 
@@ -28,7 +30,6 @@ const ALGO = 'aes-256-gcm';
 const VERSION = 'v1';
 
 let cachedKey: Buffer | null | undefined; // undefined = not resolved yet
-let warnedNoKey = false;
 
 function getKey(): Buffer | null {
   if (cachedKey !== undefined) return cachedKey;
@@ -52,17 +53,23 @@ export function isEncryptionEnabled(): boolean {
   return getKey() !== null;
 }
 
+export class PayrollEncryptionUnavailableError extends Error {
+  constructor() {
+    super('PAYROLL_ENCRYPTION_KEY is not configured; cannot store payroll bank info without at-rest encryption.');
+    this.name = 'PayrollEncryptionUnavailableError';
+  }
+}
+
 export function encryptString(plain: string | null | undefined): string | null {
   if (plain === null || plain === undefined || plain === '') return null;
   // Idempotent: if already encrypted, don't re-encrypt.
   if (plain.startsWith(VERSION + ':')) return plain;
   const key = getKey();
   if (!key) {
-    if (!warnedNoKey) {
-      console.warn('[payroll-crypto] PAYROLL_ENCRYPTION_KEY not set — storing payroll bank info in plain text. Set the env var before processing real payroll.');
-      warnedNoKey = true;
-    }
-    return plain;
+    // Fail closed. We never want to silently persist a plain-text bank
+    // account number to disk — the caller (a route) surfaces this as a
+    // 400/500 so the operator knows to set the env var.
+    throw new PayrollEncryptionUnavailableError();
   }
   const iv = randomBytes(12);
   const cipher = createCipheriv(ALGO, key, iv);
