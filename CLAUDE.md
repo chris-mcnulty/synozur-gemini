@@ -71,3 +71,11 @@ When planning new features, enhancements, or prioritizing work, ALWAYS consult t
 
 ## Communication Style
 Simple, everyday language.
+
+## Pull Request Workflow (durable preference)
+When you create a NEW pull request for this repo in any session:
+1. Immediately call `mcp__github__subscribe_pr_activity` for that PR — do not wait to be asked.
+2. Watch for review comments and CI events that arrive as `<github-webhook-activity>` messages.
+3. For each actionable review comment, investigate, push a fix on the PR branch, and post a reply to that specific comment describing what changed (or, if it can't be actioned, why). Use `mcp__github__add_reply_to_pull_request_comment` so the resolution threads to the original — every comment should end up with a visible reply so it is obvious what is resolved vs. still open.
+4. For CI failures, diagnose, push the fix, and let the next green CI event speak for itself — no need to comment on every kick.
+5. Stop only when the user explicitly says to unsubscribe, or when the PR is merged/closed.
