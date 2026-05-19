@@ -10,7 +10,7 @@ import { and, eq, desc, gte, lte, isNull, isNotNull, inArray, sql, notInArray } 
 import {
   payrollEmployees, payrollCompensation, payrollPaySchedules, payrollDeductions,
   payrollRuns, payrollRunItems, payrollGlAccounts, payrollGlMappings,
-  payrollAuditLog, payrollTaxJurisdictions, payrollPtoBalances, users, tenantUsers,
+  payrollAuditLog, payrollTaxJurisdictions, payrollPtoBalances, users, tenantUsers, timeEntries,
   type PayrollEmployee, type InsertPayrollEmployee,
   type PayrollCompensation, type InsertPayrollCompensation,
   type PayrollPaySchedule, type InsertPayrollPaySchedule,
@@ -134,6 +134,54 @@ export const payrollStorage = {
     await db.update(users)
       .set({ payrollEmployeeType: employeeType as any })
       .where(eq(users.id, userId));
+  },
+
+  /**
+   * Sum approved/submitted time-tracking hours for a user within a pay period
+   * and split into regular vs overtime by ISO-week (FLSA: hours > 40 in a week
+   * are overtime). Returns 0/0 if the user has no time entries in the window.
+   *
+   * Only counts entries with submissionStatus in ('submitted','approved') so
+   * draft/rejected entries don't accidentally enter payroll. Entries already
+   * locked into an invoice batch are still counted — locking is a billing
+   * concept, not a payroll one.
+   */
+  async sumApprovedHoursForUser(
+    tenantId: string,
+    userId: string,
+    periodStart: string,
+    periodEnd: string,
+  ): Promise<{ regularHours: number; overtimeHours: number }> {
+    const rows = await db.select({
+      date: timeEntries.date,
+      hours: timeEntries.hours,
+    })
+      .from(timeEntries)
+      .where(and(
+        eq(timeEntries.tenantId, tenantId),
+        eq(timeEntries.personId, userId),
+        gte(timeEntries.date, periodStart),
+        lte(timeEntries.date, periodEnd),
+        inArray(timeEntries.submissionStatus, ['submitted', 'approved']),
+      ));
+    if (rows.length === 0) return { regularHours: 0, overtimeHours: 0 };
+
+    // Bucket by ISO week (Mon-Sun) to apply > 40h overtime within the period.
+    const weekTotals = new Map<string, number>();
+    for (const r of rows) {
+      const d = new Date(r.date + 'T00:00:00Z');
+      const day = d.getUTCDay() || 7; // 1=Mon..7=Sun
+      const monday = new Date(d);
+      monday.setUTCDate(d.getUTCDate() - (day - 1));
+      const key = monday.toISOString().slice(0, 10);
+      weekTotals.set(key, (weekTotals.get(key) ?? 0) + Number(r.hours));
+    }
+    let regular = 0, overtime = 0;
+    for (const total of Array.from(weekTotals.values())) {
+      if (total > 40) { regular += 40; overtime += total - 40; }
+      else { regular += total; }
+    }
+    return { regularHours: Number(regular.toFixed(2)), overtimeHours: Number(overtime.toFixed(2)) };
   },
 
   // ---- Compensation ----
@@ -285,14 +333,35 @@ export const payrollStorage = {
       const overrides = perEmployeeInputs?.get(emp.id) || {};
       const comp = await this.getEffectiveComp(tenantId, emp.id, run.payDate);
       const deductions = await this.listDeductions(tenantId, emp.id);
+
+      // Time-tracking feed: when the payroll employee is linked to an internal
+      // user, sum their approved/submitted time entries across the pay period
+      // as the default hours, split into regular vs overtime by week.
+      let tsRegular = 0, tsOvertime = 0, sourcedFromTimesheets = false;
+      if (emp.userId && overrides.hoursWorked === undefined && overrides.overtimeHours === undefined) {
+        const sums = await this.sumApprovedHoursForUser(
+          tenantId, emp.userId, run.periodStart, run.periodEnd,
+        );
+        tsRegular = sums.regularHours;
+        tsOvertime = sums.overtimeHours;
+        sourcedFromTimesheets = tsRegular > 0 || tsOvertime > 0;
+      }
+
+      const fallbackHoursPerWeek = comp?.compType === 'hourly' ? Number(comp.hoursPerWeek || 40) : 0;
+      const fallbackPeriodMultiplier = schedule.frequency === 'weekly' ? 1 : schedule.frequency === 'biweekly' ? 2 : schedule.frequency === 'semimonthly' ? 2.16 : 4.33;
+      const finalHoursWorked = overrides.hoursWorked
+        ?? (sourcedFromTimesheets ? tsRegular : fallbackHoursPerWeek * fallbackPeriodMultiplier);
+      const finalOvertimeHours = overrides.overtimeHours
+        ?? (sourcedFromTimesheets ? tsOvertime : 0);
+
       const result = computePayroll({
         employee: emp,
         compensation: comp,
         schedule,
         deductions,
         jurisdictions,
-        hoursWorked: overrides.hoursWorked ?? (comp?.compType === 'hourly' ? Number(comp.hoursPerWeek || 40) * (schedule.frequency === 'weekly' ? 1 : schedule.frequency === 'biweekly' ? 2 : schedule.frequency === 'semimonthly' ? 2.16 : 4.33) : 0),
-        overtimeHours: overrides.overtimeHours ?? 0,
+        hoursWorked: finalHoursWorked,
+        overtimeHours: finalOvertimeHours,
         ptoHoursUsed: overrides.ptoHoursUsed ?? 0,
         bonusCents: overrides.bonusCents ?? 0,
         commissionCents: overrides.commissionCents ?? 0,
@@ -301,8 +370,8 @@ export const payrollStorage = {
       const [item] = await db.insert(payrollRunItems).values({
         tenantId, runId,
         employeeId: emp.id,
-        hoursWorked: String(overrides.hoursWorked ?? 0),
-        overtimeHours: String(overrides.overtimeHours ?? 0),
+        hoursWorked: String(finalHoursWorked),
+        overtimeHours: String(finalOvertimeHours),
         ptoHoursUsed: String(overrides.ptoHoursUsed ?? 0),
         bonusCents: overrides.bonusCents ?? 0,
         commissionCents: overrides.commissionCents ?? 0,
