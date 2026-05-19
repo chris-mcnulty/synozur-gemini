@@ -11,7 +11,8 @@ import {
   payrollEmployees, payrollCompensation, payrollPaySchedules, payrollDeductions,
   payrollRuns, payrollRunItems, payrollGlAccounts, payrollGlMappings,
   payrollAuditLog, payrollTaxJurisdictions, payrollPtoBalances, payrollAchOriginator,
-  users, tenantUsers, timeEntries,
+  payrollReimbursementLines,
+  users, tenantUsers, timeEntries, expenses,
   type PayrollEmployee, type InsertPayrollEmployee,
   type PayrollCompensation, type InsertPayrollCompensation,
   type PayrollPaySchedule, type InsertPayrollPaySchedule,
@@ -24,6 +25,7 @@ import {
   type PayrollAuditLog, type InsertPayrollAuditLog,
   type PayrollPtoBalance,
   type PayrollAchOriginator, type InsertPayrollAchOriginator,
+  type PayrollReimbursementLine,
 } from "@shared/schema";
 import { computePayroll, type PayrollEngineInputs } from "../services/payroll-engine";
 
@@ -136,6 +138,56 @@ export const payrollStorage = {
     await db.update(users)
       .set({ payrollEmployeeType: employeeType as any })
       .where(eq(users.id, userId));
+  },
+
+  /**
+   * Find Constellation expenses eligible to be bundled into a payroll run
+   * for the given user.
+   *
+   * Criteria:
+   *   1. expenses.reimbursable = true
+   *   2. expenses.approvalStatus = 'approved'
+   *   3. expenses.payrollRunItemId IS NULL (not already on a run)
+   *   4. expenses.reimbursementBatchId IS NULL (not paid via legacy batch)
+   *   5. expenses.date <= periodEnd
+   *   6. currency = 'USD' (phase 1 limitation; multi-currency follows)
+   *
+   * Excludes are checked against (expenseId) — passing a set lets the admin
+   * say "skip this one on this run" via the route layer.
+   */
+  async listReimbursableExpensesForUser(
+    tenantId: string,
+    userId: string,
+    periodEnd: string,
+    excludeExpenseIds: Set<string> = new Set(),
+  ): Promise<Array<{ id: string; amountCents: number; category: string; description: string | null; date: string }>> {
+    const rows = await db.select({
+      id: expenses.id,
+      amount: expenses.amount,
+      category: expenses.category,
+      description: expenses.description,
+      date: expenses.date,
+      currency: expenses.currency,
+    })
+      .from(expenses)
+      .where(and(
+        eq(expenses.tenantId, tenantId),
+        eq(expenses.personId, userId),
+        eq(expenses.reimbursable, true),
+        eq(expenses.approvalStatus, 'approved'),
+        isNull(expenses.payrollRunItemId),
+        isNull(expenses.reimbursementBatchId),
+        lte(expenses.date, periodEnd),
+      ));
+    return rows
+      .filter(r => r.currency === 'USD' && !excludeExpenseIds.has(r.id))
+      .map(r => ({
+        id: r.id,
+        amountCents: Math.round(Number(r.amount) * 100),
+        category: r.category,
+        description: r.description,
+        date: r.date,
+      }));
   },
 
   /**
@@ -324,6 +376,44 @@ export const payrollStorage = {
       .where(and(eq(payrollRunItems.tenantId, tenantId), eq(payrollRunItems.runId, runId)));
   },
 
+  /**
+   * Return the per-expense reimbursement lines for a run, joined with the
+   * employee and run-item id. Drives the run-detail "Reimbursements
+   * bundled into this run" section.
+   */
+  async listReimbursementsForRun(tenantId: string, runId: string) {
+    return db.select({
+      id: payrollReimbursementLines.id,
+      runItemId: payrollReimbursementLines.runItemId,
+      employeeId: payrollRunItems.employeeId,
+      expenseId: payrollReimbursementLines.expenseId,
+      amountCents: payrollReimbursementLines.amountCents,
+      category: payrollReimbursementLines.category,
+      description: payrollReimbursementLines.description,
+      employeeName: sql<string>`${payrollEmployees.firstName} || ' ' || ${payrollEmployees.lastName}`,
+    })
+      .from(payrollReimbursementLines)
+      .innerJoin(payrollRunItems, eq(payrollReimbursementLines.runItemId, payrollRunItems.id))
+      .innerJoin(payrollEmployees, eq(payrollRunItems.employeeId, payrollEmployees.id))
+      .where(and(
+        eq(payrollReimbursementLines.tenantId, tenantId),
+        eq(payrollRunItems.runId, runId),
+      ));
+  },
+
+  /**
+   * Per-employee reimbursement detail for a single finalized run item.
+   * Used by the self-service paystub view to itemize the non-taxable
+   * portion of net pay.
+   */
+  async listReimbursementsForRunItem(tenantId: string, runItemId: string): Promise<PayrollReimbursementLine[]> {
+    return db.select().from(payrollReimbursementLines)
+      .where(and(
+        eq(payrollReimbursementLines.tenantId, tenantId),
+        eq(payrollReimbursementLines.runItemId, runItemId),
+      ));
+  },
+
   async createRun(data: InsertPayrollRun): Promise<PayrollRun> {
     if (data.idempotencyKey) {
       const [existing] = await db.select().from(payrollRuns)
@@ -376,6 +466,21 @@ export const payrollStorage = {
       const comp = await this.getEffectiveComp(tenantId, emp.id, run.payDate);
       const deductions = await this.listDeductions(tenantId, emp.id);
 
+      // Expense reimbursement feed: pick up approved Constellation
+      // reimbursable expenses for this employee, sum them, and pass the
+      // total into the engine. The engine adds them to net pay AFTER
+      // tax math (accountable plan; never wages). We do this BEFORE
+      // calling computePayroll so the line shows in the breakdown.
+      let reimbursementCents = 0;
+      let reimbursementExpenses: Array<{ id: string; amountCents: number; category: string; description: string | null }> = [];
+      if (emp.userId && emp.employeeType === 'w2') {
+        const candidates = await this.listReimbursableExpensesForUser(
+          tenantId, emp.userId, run.periodEnd,
+        );
+        reimbursementExpenses = candidates;
+        reimbursementCents = candidates.reduce((s, c) => s + c.amountCents, 0);
+      }
+
       // Time-tracking feed: when the payroll employee is linked to an internal
       // user, sum their approved/submitted time entries across the pay period
       // as the default hours, split into regular vs overtime by week.
@@ -412,6 +517,7 @@ export const payrollStorage = {
         ytdSsWagesCents: ytd.ytdSsWagesCents,
         ytdMedicareWagesCents: ytd.ytdMedicareWagesCents,
         ytdFutaWagesCents: ytd.ytdFutaWagesCents,
+        reimbursementCents,
       });
       const [item] = await db.insert(payrollRunItems).values({
         tenantId, runId,
@@ -419,6 +525,7 @@ export const payrollStorage = {
         hoursWorked: String(finalHoursWorked),
         overtimeHours: String(finalOvertimeHours),
         ptoHoursUsed: String(overrides.ptoHoursUsed ?? 0),
+        reimbursementCents,
         bonusCents: overrides.bonusCents ?? 0,
         commissionCents: overrides.commissionCents ?? 0,
         retroPayCents: overrides.retroPayCents ?? 0,
@@ -431,6 +538,22 @@ export const payrollStorage = {
         breakdown: { lines: result.lines, taxableWagesCents: result.taxableWagesCents },
       }).returning();
       items.push(item);
+
+      // Record each bundled expense as a reimbursement line so the paystub
+      // can itemize and finalize can stamp the expenses. We don't mark
+      // them paid until finalize — preview can be replayed any number of
+      // times without locking the expenses.
+      if (reimbursementExpenses.length > 0) {
+        await db.insert(payrollReimbursementLines).values(reimbursementExpenses.map(e => ({
+          tenantId,
+          runItemId: item.id,
+          expenseId: e.id,
+          amountCents: e.amountCents,
+          category: e.category,
+          description: e.description,
+        })));
+      }
+
       totalGross += result.grossCents;
       totalEeTax += result.employeeTaxCents;
       totalErTax += result.employerTaxCents;
@@ -473,7 +596,52 @@ export const payrollStorage = {
     // without affecting balances. Errors here surface to the caller; the
     // alternative (silent failure) would let balances drift.
     await this.accruePtoForRun(tenantId, runId);
+    // Stamp any bundled reimbursable expenses with the run item id and a
+    // timestamp so they leave the candidate pool and the legacy
+    // reimbursement-batch UI knows they're already paid.
+    await this.stampReimbursedExpensesForRun(tenantId, runId);
     return row;
+  },
+
+  /**
+   * After a regular run finalizes, mark every expense bundled into the run
+   * as paid via payroll. Conversely, after a reversal run finalizes, clear
+   * the stamps so the expenses re-enter the candidate pool.
+   */
+  async stampReimbursedExpensesForRun(tenantId: string, runId: string): Promise<void> {
+    const run = await this.getRun(tenantId, runId);
+    if (!run) return;
+    const lines = await db.select().from(payrollReimbursementLines)
+      .innerJoin(payrollRunItems, eq(payrollReimbursementLines.runItemId, payrollRunItems.id))
+      .where(and(
+        eq(payrollReimbursementLines.tenantId, tenantId),
+        eq(payrollRunItems.runId, runId),
+      ));
+    if (lines.length === 0) return;
+    const expenseIds = lines.map(l => l.payroll_reimbursement_lines.expenseId);
+    if (run.runType === 'reversal') {
+      await db.update(expenses)
+        .set({ payrollRunItemId: null, payrollReimbursedAt: null })
+        .where(and(
+          eq(expenses.tenantId, tenantId),
+          inArray(expenses.id, expenseIds),
+        ));
+    } else {
+      // Map expense id -> the new run item id it sits on, so a single round
+      // trip handles many employees.
+      const byExpense = new Map(lines.map(l => [
+        l.payroll_reimbursement_lines.expenseId,
+        l.payroll_reimbursement_lines.runItemId,
+      ]));
+      for (const [expenseId, runItemId] of Array.from(byExpense.entries())) {
+        await db.update(expenses)
+          .set({ payrollRunItemId: runItemId, payrollReimbursedAt: new Date() })
+          .where(and(
+            eq(expenses.tenantId, tenantId),
+            eq(expenses.id, expenseId),
+          ));
+      }
+    }
   },
 
   /**
@@ -512,7 +680,7 @@ export const payrollStorage = {
 
     const items = await this.listRunItems(tenantId, original.id);
     if (items.length > 0) {
-      await db.insert(payrollRunItems).values(items.map(it => ({
+      const insertedItems = await db.insert(payrollRunItems).values(items.map(it => ({
         tenantId,
         runId: run.id,
         employeeId: it.employeeId,
@@ -527,9 +695,40 @@ export const payrollStorage = {
         employerTaxCents: -it.employerTaxCents,
         preTaxDeductionCents: -it.preTaxDeductionCents,
         postTaxDeductionCents: -it.postTaxDeductionCents,
+        reimbursementCents: -((it as any).reimbursementCents ?? 0),
         netPayCents: -it.netPayCents,
         breakdown: { reversalOf: original.id, original: it.breakdown },
-      })));
+      }))).returning();
+
+      // Mirror reimbursement lines onto the reversal items so finalize can
+      // release the underlying expenses back into the candidate pool.
+      const itemByEmp = new Map(insertedItems.map(i => [i.employeeId, i.id]));
+      const origLines = await db.select({
+        runItemId: payrollReimbursementLines.runItemId,
+        expenseId: payrollReimbursementLines.expenseId,
+        amountCents: payrollReimbursementLines.amountCents,
+        category: payrollReimbursementLines.category,
+        description: payrollReimbursementLines.description,
+        employeeId: payrollRunItems.employeeId,
+      })
+        .from(payrollReimbursementLines)
+        .innerJoin(payrollRunItems, eq(payrollReimbursementLines.runItemId, payrollRunItems.id))
+        .where(and(
+          eq(payrollReimbursementLines.tenantId, tenantId),
+          eq(payrollRunItems.runId, original.id),
+        ));
+      if (origLines.length > 0) {
+        await db.insert(payrollReimbursementLines).values(
+          origLines.map(l => ({
+            tenantId,
+            runItemId: itemByEmp.get(l.employeeId)!,
+            expenseId: l.expenseId,
+            amountCents: -l.amountCents,
+            category: l.category,
+            description: `Reversal: ${l.description ?? ''}`.trim(),
+          })),
+        );
+      }
     }
     return run;
   },
@@ -615,12 +814,13 @@ export const payrollStorage = {
     // Walk each item's breakdown to split garnishments out from generic
     // post-tax deductions; the engine emits them with category='garnishment'.
     let wages = 0, employerTax = 0, employeeTax = 0, preTax = 0;
-    let postTax = 0, garnishment = 0, net = 0;
+    let postTax = 0, garnishment = 0, reimbursement = 0, net = 0;
     for (const it of items) {
       wages += it.grossCents;
       employerTax += it.employerTaxCents;
       employeeTax += it.employeeTaxCents;
       preTax += it.preTaxDeductionCents;
+      reimbursement += (it as any).reimbursementCents ?? 0;
       net += it.netPayCents;
       const lines = ((it.breakdown as any)?.lines ?? []) as Array<{ category: string; amountCents: number }>;
       let itemGarnishment = 0;
@@ -646,6 +846,11 @@ export const payrollStorage = {
     push('pre_tax_deduction', 0, preTax);
     push('post_tax_deduction', 0, postTax);
     push('garnishment_liability', 0, garnishment);
+    // Reimbursements debited reduce the AP liability Constellation already
+    // booked at expense approval time. If the tenant hasn't mapped
+    // reimbursement_clearing they get one bigger net_pay_clearing credit
+    // (functionally correct, harder to reconcile).
+    push('reimbursement_clearing', reimbursement, 0);
     push('net_pay_clearing', 0, net);
     push('employer_tax_liability', 0, employerTax);
     return out;

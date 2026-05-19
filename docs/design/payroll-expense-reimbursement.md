@@ -1,9 +1,54 @@
 # Design: Employee Expense Reimbursement via Payroll
 
-**Status:** Draft
+**Status:** Phase 1 shipped (May 19, 2026)
 **Author:** Gemini Payroll team
 **Last Updated:** May 19, 2026
 **Targets:** Constellation `expenses` + `reimbursement_batches` ↔ Gemini `payroll_runs`
+
+## Phase 1 — Shipped
+
+The following from this design is live:
+
+- Schema (migration 0020): `expenses.payroll_run_item_id`,
+  `expenses.payroll_reimbursed_at`, `payroll_run_items.reimbursement_cents`,
+  table `payroll_reimbursement_lines`.
+- Engine (`computePayroll`): new `reimbursementCents` input added to net
+  pay after tax math; emits a `category: 'reimbursement'` line for the
+  paystub breakdown.
+- `previewRun`: for each W-2 employee linked to an internal user, pulls
+  candidate reimbursable USD expenses (`reimbursable=true`,
+  `approvalStatus='approved'`, not on another run, not on a legacy
+  batch, `date <= periodEnd`) and bundles them as one
+  `payroll_reimbursement_lines` row per expense.
+- `finalizeRun`: stamps `expenses.payroll_run_item_id` and
+  `payroll_reimbursed_at` so the legacy reimbursement-batch path skips
+  them. Reversal runs clear those stamps so the expense returns to the
+  candidate pool.
+- NACHA: each entry's `amountCents = netPayCents` already includes
+  reimbursements (one bank credit per employee covering wages +
+  expenses).
+- GL export: new `reimbursement_clearing` debit. Tenants who haven't
+  mapped it get a larger `net_pay_clearing` credit (still balances).
+- Tax totals (W-2/941): reimbursements are excluded automatically
+  because they were never in `grossCents`.
+- Admin UI: payroll run detail page has a "Reimbursements bundled into
+  this run" section with employee + category + description.
+- Self-service paystub: new "Reimbursements (not taxable)" card with
+  total + per-expense itemization; "Total deposited" splits wages-net vs
+  reimbursement.
+
+## Phase 1 — Deferred to Phase 2
+
+These are documented below but NOT in the shipped code:
+
+- `payrollReimbursementMode` tenant setting (off / opt_in / auto). Phase 1
+  is effectively `auto` for every tenant.
+- Banner on the Constellation expense detail page ("will be reimbursed
+  in next payroll run" / "reimbursed via run #...").
+- "Exclude this reimbursement from this run" admin UI on the run page.
+- Multi-currency reimbursement (FX conversion at `previewRun` time).
+- Per diem accountable / non-accountable split (above-federal-rate
+  portion).
 
 ## 1. Why integrate
 

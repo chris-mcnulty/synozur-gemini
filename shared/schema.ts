@@ -1227,6 +1227,11 @@ export const expenses = pgTable("expenses", {
   rejectionNote: text("rejection_note"),
   reimbursedAt: timestamp("reimbursed_at"),
   reimbursementBatchId: varchar("reimbursement_batch_id"), // Will reference reimbursementBatches
+  // Payroll integration: when the reimbursement was paid via a payroll run
+  // (Gemini), this points at the run item it rode in on. Mutually exclusive
+  // with reimbursementBatchId in normal operation.
+  payrollRunItemId: varchar("payroll_run_item_id"),
+  payrollReimbursedAt: timestamp("payroll_reimbursed_at"),
   clientPaidAt: timestamp("client_paid_at"), // When client paid for this expense via invoice batch
   createdAt: timestamp("created_at").notNull().default(sql`now()`),
 }, (table) => ({
@@ -4603,6 +4608,10 @@ export const payrollRunItems = pgTable("payroll_run_items", {
   employerTaxCents: integer("employer_tax_cents").notNull().default(0),
   preTaxDeductionCents: integer("pre_tax_deduction_cents").notNull().default(0),
   postTaxDeductionCents: integer("post_tax_deduction_cents").notNull().default(0),
+  // Constellation expense reimbursements rolled into this run item. Added
+  // to net pay AFTER tax math (accountable-plan, non-taxable). Not part of
+  // grossCents and never reported on the W-2 / 941 totals.
+  reimbursementCents: integer("reimbursement_cents").notNull().default(0),
   netPayCents: integer("net_pay_cents").notNull().default(0),
   // Detailed breakdown for audit (lines).
   breakdown: jsonb("breakdown").$type<Record<string, any>>(),
@@ -4616,6 +4625,28 @@ export const payrollRunItems = pgTable("payroll_run_items", {
 export const insertPayrollRunItemSchema = createInsertSchema(payrollRunItems).omit({ id: true, createdAt: true });
 export type InsertPayrollRunItem = z.infer<typeof insertPayrollRunItemSchema>;
 export type PayrollRunItem = typeof payrollRunItems.$inferSelect;
+
+// Per-expense itemization for reimbursements bundled into a payroll run item.
+// One row per Constellation expense rolled in. Lets the paystub itemize what
+// makes up the reimbursement total and supports auditor reconciliation back
+// to specific receipts.
+export const payrollReimbursementLines = pgTable("payroll_reimbursement_lines", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  tenantId: varchar("tenant_id").notNull().references(() => tenants.id, { onDelete: 'cascade' }),
+  runItemId: varchar("run_item_id").notNull().references(() => payrollRunItems.id, { onDelete: 'cascade' }),
+  expenseId: varchar("expense_id").notNull(),
+  amountCents: integer("amount_cents").notNull(),
+  category: text("category").notNull(),
+  description: text("description"),
+  createdAt: timestamp("created_at").notNull().default(sql`now()`),
+}, (t) => ({
+  runItemIdx: index("idx_payroll_reim_lines_run_item").on(t.runItemId),
+  expenseIdx: index("idx_payroll_reim_lines_expense").on(t.expenseId),
+}));
+
+export const insertPayrollReimbursementLineSchema = createInsertSchema(payrollReimbursementLines).omit({ id: true, createdAt: true });
+export type InsertPayrollReimbursementLine = z.infer<typeof insertPayrollReimbursementLineSchema>;
+export type PayrollReimbursementLine = typeof payrollReimbursementLines.$inferSelect;
 
 // GL accounts & mappings — drive accounting export (CSV/JSON).
 export const payrollGlAccounts = pgTable("payroll_gl_accounts", {

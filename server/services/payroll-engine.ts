@@ -33,6 +33,9 @@ export interface PayrollEngineInputs {
   bonusCents: number;
   commissionCents: number;
   retroPayCents: number;
+  // Accountable-plan expense reimbursements (Constellation expenses).
+  // Added to net pay AFTER tax math; NEVER part of gross. Default 0.
+  reimbursementCents?: number;
   // YTD accumulators (cents) — sums of taxable wages from finalized runs in
   // the same calendar year, EXCLUDING the current period. Used to apply true
   // YTD caps for SS wage base, additional Medicare threshold, and FUTA cap.
@@ -351,7 +354,17 @@ export function computePayroll(inp: PayrollEngineInputs): PayrollEngineResult {
     }
   }
 
-  const netPayCents = Math.max(0, grossCents - preTaxCents - employeeTaxCents - postTaxCents);
+  // Wages portion of net pay — what's actually taxable / on the W-2.
+  const wagesNetCents = Math.max(0, grossCents - preTaxCents - employeeTaxCents - postTaxCents);
+  // Accountable-plan reimbursements ride along to deposit but are not wages
+  // and never reduce the gross calc. Surface them as a distinct line so the
+  // paystub and audit log can split the bank-credit amount from the W-2
+  // taxable wages.
+  const reimbursementCents = inp.reimbursementCents ?? 0;
+  if (reimbursementCents > 0) {
+    lines.push({ category: 'reimbursement', label: 'Expense reimbursement (non-taxable)', amountCents: reimbursementCents });
+  }
+  const netPayCents = wagesNetCents + reimbursementCents;
   lines.push({ category: 'net_pay', label: 'Net pay', amountCents: netPayCents });
 
   return {

@@ -260,7 +260,8 @@ export function registerPayrollRoutes(app: Express, deps: PayrollRouteDeps) {
       const run = await payrollStorage.getRun(tenantId, req.params.id);
       if (!run) return res.status(404).json({ message: 'Not found' });
       const items = await payrollStorage.listRunItems(tenantId, run.id);
-      res.json({ run, items });
+      const reimbursements = await payrollStorage.listReimbursementsForRun(tenantId, run.id);
+      res.json({ run, items, reimbursements });
     } catch (e: any) { res.status(500).json({ message: e.message }); }
   });
 
@@ -614,7 +615,8 @@ export function registerPayrollRoutes(app: Express, deps: PayrollRouteDeps) {
       if (!emp) return res.status(404).json({ message: 'You are not enrolled in payroll' });
       const detail = await payrollStorage.getPaystubForEmployee(tenantId, emp.id, req.params.runId);
       if (!detail) return res.status(404).json({ message: 'Paystub not found' });
-      res.json(detail);
+      const reimbursements = await payrollStorage.listReimbursementsForRunItem(tenantId, detail.item.id);
+      res.json({ ...detail, reimbursements });
     } catch (e: any) { res.status(500).json({ message: e.message }); }
   });
 

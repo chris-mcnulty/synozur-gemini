@@ -34,6 +34,11 @@ export default function PayrollRunDetail() {
   if (isLoading || !data) return <Layout><div className="p-6">Loading…</div></Layout>;
   const r = data.run;
   const items = data.items as any[];
+  const reimbursements = (data.reimbursements ?? []) as Array<{
+    id: string; employeeId: string; employeeName: string; expenseId: string;
+    amountCents: number; category: string; description: string | null;
+  }>;
+  const reimbursementTotal = reimbursements.reduce((s, x) => s + x.amountCents, 0);
 
   return (
     <Layout>
@@ -62,6 +67,34 @@ export default function PayrollRunDetail() {
           <Card><CardHeader className="pb-2"><CardTitle className="text-xs text-muted-foreground">Deductions</CardTitle></CardHeader><CardContent><div className="text-xl font-semibold">{fmtMoney(r.totalDeductionsCents)}</div></CardContent></Card>
           <Card><CardHeader className="pb-2"><CardTitle className="text-xs text-muted-foreground">Net pay</CardTitle></CardHeader><CardContent><div className="text-xl font-semibold">{fmtMoney(r.totalNetCents)}</div></CardContent></Card>
         </div>
+
+        {reimbursements.length > 0 && (
+          <Card>
+            <CardHeader>
+              <CardTitle>Expense reimbursements bundled into this run</CardTitle>
+              <p className="text-xs text-muted-foreground mt-1">
+                Constellation-approved reimbursable expenses paid through payroll (accountable plan — not taxable). Total {fmtMoney(reimbursementTotal)} across {reimbursements.length} {reimbursements.length === 1 ? 'expense' : 'expenses'}.
+              </p>
+            </CardHeader>
+            <CardContent>
+              <table className="w-full text-sm">
+                <thead className="text-left text-muted-foreground border-b">
+                  <tr><th className="py-2">Employee</th><th>Category</th><th>Description</th><th className="text-right">Amount</th></tr>
+                </thead>
+                <tbody>
+                  {reimbursements.map(rb => (
+                    <tr key={rb.id} className="border-b last:border-0" data-testid={`row-reimbursement-${rb.id}`}>
+                      <td className="py-2">{rb.employeeName}</td>
+                      <td><span className="px-2 py-0.5 text-xs rounded bg-accent">{rb.category}</span></td>
+                      <td className="text-muted-foreground">{rb.description ?? '—'}</td>
+                      <td className="text-right font-medium">{fmtMoney(rb.amountCents)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </CardContent>
+          </Card>
+        )}
 
         <Card>
           <CardHeader><CardTitle>Per-employee breakdown</CardTitle></CardHeader>

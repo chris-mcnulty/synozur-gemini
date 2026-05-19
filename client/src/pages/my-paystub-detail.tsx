@@ -8,7 +8,7 @@ const usd = (cents: number) => `$${(cents / 100).toFixed(2)}`;
 
 export default function MyPaystubDetail() {
   const { runId } = useParams<{ runId: string }>();
-  const { data, isLoading, error } = useQuery<{ run: any; item: any }>({
+  const { data, isLoading, error } = useQuery<{ run: any; item: any; reimbursements?: Array<{ id: string; amountCents: number; category: string; description: string | null }> }>({
     queryKey: [`/api/me/payroll/paystubs/${runId}`],
   });
 
@@ -20,6 +20,9 @@ export default function MyPaystubDetail() {
   const preTax = lines.filter(l => l.category === 'pre_tax_deduction');
   const eeTax = lines.filter(l => l.category === 'employee_tax');
   const postTax = lines.filter(l => l.category === 'post_tax' || l.category === 'garnishment');
+  const reimbursements = data.reimbursements ?? [];
+  const reimbursementTotal = reimbursements.reduce((s, r) => s + r.amountCents, 0);
+  const wagesNet = (data.item.netPayCents as number) - reimbursementTotal;
 
   return (
     <Layout>
@@ -79,11 +82,40 @@ export default function MyPaystubDetail() {
           </Card>
         )}
 
+        {reimbursements.length > 0 && (
+          <Card>
+            <CardHeader>
+              <CardTitle>Reimbursements (not taxable)</CardTitle>
+              <p className="text-xs text-muted-foreground mt-1">
+                Expense reimbursements paid alongside your paycheck. Not included in your W-2 Box 1 wages.
+              </p>
+            </CardHeader>
+            <CardContent>
+              <table className="w-full text-sm">
+                <tbody>
+                  {reimbursements.map(r => (
+                    <tr key={r.id}>
+                      <td className="py-1">{r.description ?? r.category}</td>
+                      <td className="text-right">{usd(r.amountCents)}</td>
+                    </tr>
+                  ))}
+                  <tr className="border-t font-medium"><td className="py-2">Total reimbursements</td><td className="text-right">{usd(reimbursementTotal)}</td></tr>
+                </tbody>
+              </table>
+            </CardContent>
+          </Card>
+        )}
+
         <Card>
-          <CardHeader><CardTitle>Net pay</CardTitle></CardHeader>
+          <CardHeader><CardTitle>Total deposited</CardTitle></CardHeader>
           <CardContent>
             <div className="text-2xl font-semibold">{usd(data.item.netPayCents)}</div>
-            <p className="text-xs text-muted-foreground mt-1">Tax tables in this build are stubbed (2024 brackets, simplified) — withholding shown is an estimate. Your year-end W-2 / 1099 is the source of truth.</p>
+            {reimbursementTotal > 0 && (
+              <div className="text-xs text-muted-foreground mt-2">
+                = {usd(wagesNet)} wages (after tax) + {usd(reimbursementTotal)} reimbursement
+              </div>
+            )}
+            <p className="text-xs text-muted-foreground mt-2">Tax tables in this build are stubbed (2024 brackets, simplified) — withholding shown is an estimate. Your year-end W-2 / 1099 is the source of truth.</p>
           </CardContent>
         </Card>
       </div>
