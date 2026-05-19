@@ -4389,6 +4389,12 @@ export const payrollEmployees = pgTable("payroll_employees", {
   w4DeductionsCents: integer("w4_deductions_cents").default(0),
   w4ExtraWithholdingCents: integer("w4_extra_withholding_cents").default(0),
   defaultPayScheduleId: varchar("default_pay_schedule_id"),
+  // Direct deposit (for ACH/NACHA export). Production deployments must store
+  // accountNumberEnc encrypted at rest — this column currently holds plain
+  // text for the stubbed implementation. Routing is the 9-digit ABA number.
+  bankRoutingNumber: varchar("bank_routing_number", { length: 9 }),
+  bankAccountNumberEnc: varchar("bank_account_number_enc", { length: 64 }),
+  bankAccountType: varchar("bank_account_type", { length: 16 }), // 'checking' | 'savings'
   // Soft delete for compliance
   deletedAt: timestamp("deleted_at"),
   createdAt: timestamp("created_at").notNull().default(sql`now()`),
@@ -4426,6 +4432,26 @@ export const payrollCompensation = pgTable("payroll_compensation", {
 export const insertPayrollCompensationSchema = createInsertSchema(payrollCompensation).omit({ id: true, createdAt: true });
 export type InsertPayrollCompensation = z.infer<typeof insertPayrollCompensationSchema>;
 export type PayrollCompensation = typeof payrollCompensation.$inferSelect;
+
+// Per-tenant company info used to populate NACHA / ACH disbursement files.
+// One row per tenant; created lazily when an admin first sets up direct deposit.
+export const payrollAchOriginator = pgTable("payroll_ach_originator", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  tenantId: varchar("tenant_id").notNull().references(() => tenants.id, { onDelete: 'cascade' }).unique(),
+  companyName: varchar("company_name", { length: 16 }).notNull(), // NACHA field is 16 chars
+  companyId: varchar("company_id", { length: 10 }).notNull(), // EIN with leading 1, or DUNS
+  originatingDfi: varchar("originating_dfi", { length: 8 }).notNull(), // 8-digit routing prefix
+  immediateOriginName: varchar("immediate_origin_name", { length: 23 }).notNull(),
+  immediateOrigin: varchar("immediate_origin", { length: 10 }).notNull(),
+  immediateDestinationName: varchar("immediate_destination_name", { length: 23 }).notNull(),
+  immediateDestination: varchar("immediate_destination", { length: 10 }).notNull(),
+  createdAt: timestamp("created_at").notNull().default(sql`now()`),
+  updatedAt: timestamp("updated_at").notNull().default(sql`now()`),
+});
+
+export const insertPayrollAchOriginatorSchema = createInsertSchema(payrollAchOriginator).omit({ id: true, createdAt: true, updatedAt: true });
+export type InsertPayrollAchOriginator = z.infer<typeof insertPayrollAchOriginatorSchema>;
+export type PayrollAchOriginator = typeof payrollAchOriginator.$inferSelect;
 
 // Pay schedules — define cadence, period boundaries, and pay date offset.
 export const payrollPaySchedules = pgTable("payroll_pay_schedules", {

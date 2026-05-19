@@ -10,7 +10,8 @@ import { and, eq, desc, gte, lte, isNull, isNotNull, inArray, sql, notInArray } 
 import {
   payrollEmployees, payrollCompensation, payrollPaySchedules, payrollDeductions,
   payrollRuns, payrollRunItems, payrollGlAccounts, payrollGlMappings,
-  payrollAuditLog, payrollTaxJurisdictions, payrollPtoBalances, users, tenantUsers, timeEntries,
+  payrollAuditLog, payrollTaxJurisdictions, payrollPtoBalances, payrollAchOriginator,
+  users, tenantUsers, timeEntries,
   type PayrollEmployee, type InsertPayrollEmployee,
   type PayrollCompensation, type InsertPayrollCompensation,
   type PayrollPaySchedule, type InsertPayrollPaySchedule,
@@ -22,6 +23,7 @@ import {
   type PayrollTaxJurisdiction, type InsertPayrollTaxJurisdiction,
   type PayrollAuditLog, type InsertPayrollAuditLog,
   type PayrollPtoBalance,
+  type PayrollAchOriginator, type InsertPayrollAchOriginator,
 } from "@shared/schema";
 import { computePayroll, type PayrollEngineInputs } from "../services/payroll-engine";
 
@@ -571,6 +573,26 @@ export const payrollStorage = {
     // Employer tax liability mirrors employer tax expense.
     push('employer_tax_liability', 0, employerTax);
     return out;
+  },
+
+  // ---- ACH originator (one row per tenant) ----
+  async getAchOriginator(tenantId: string): Promise<PayrollAchOriginator | undefined> {
+    const [row] = await db.select().from(payrollAchOriginator)
+      .where(eq(payrollAchOriginator.tenantId, tenantId));
+    return row;
+  },
+
+  async upsertAchOriginator(data: InsertPayrollAchOriginator): Promise<PayrollAchOriginator> {
+    const existing = await this.getAchOriginator(data.tenantId);
+    if (existing) {
+      const [row] = await db.update(payrollAchOriginator)
+        .set({ ...data, updatedAt: new Date() })
+        .where(eq(payrollAchOriginator.tenantId, data.tenantId))
+        .returning();
+      return row;
+    }
+    const [row] = await db.insert(payrollAchOriginator).values(data).returning();
+    return row;
   },
 
   // ---- PTO ----

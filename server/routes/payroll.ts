@@ -17,8 +17,9 @@ import {
   insertPayrollEmployeeSchema, insertPayrollCompensationSchema,
   insertPayrollPayScheduleSchema, insertPayrollDeductionSchema,
   insertPayrollRunSchema, insertPayrollTaxJurisdictionSchema,
-  insertPayrollGlAccountSchema,
+  insertPayrollGlAccountSchema, insertPayrollAchOriginatorSchema,
 } from "@shared/schema";
+import { buildNachaFile, type NachaEntry } from "../services/nacha";
 
 interface PayrollRouteDeps {
   requireAuth: any;
@@ -372,6 +373,87 @@ export function registerPayrollRoutes(app: Express, deps: PayrollRouteDeps) {
         return res.send([header, ...lines].join('\n'));
       }
       res.json(rows);
+    } catch (e: any) { res.status(500).json({ message: e.message }); }
+  });
+
+  // ---- ACH / NACHA disbursement ----
+  app.get('/api/payroll/ach-originator', requireAuth, PM, async (req, res) => {
+    try { res.json(await payrollStorage.getAchOriginator(tenantOf(req)) || null); }
+    catch (e: any) { res.status(500).json({ message: e.message }); }
+  });
+
+  app.put('/api/payroll/ach-originator', requireAuth, PM, async (req, res) => {
+    try {
+      const tenantId = tenantOf(req);
+      const body = insertPayrollAchOriginatorSchema.parse({ ...req.body, tenantId });
+      const row = await payrollStorage.upsertAchOriginator(body);
+      await payrollStorage.appendAudit({
+        tenantId, actorUserId: (req.user as any)?.id,
+        action: 'ach_originator.upsert', entityType: 'ach_originator', entityId: row.id,
+        ipAddress: req.ip,
+      });
+      res.json(row);
+    } catch (e: any) { res.status(400).json({ message: e.message }); }
+  });
+
+  app.get('/api/payroll/runs/:id/ach-export', requireAuth, PM, async (req, res) => {
+    try {
+      const tenantId = tenantOf(req);
+      const run = await payrollStorage.getRun(tenantId, req.params.id);
+      if (!run) return res.status(404).json({ message: 'Run not found' });
+      if (run.status !== 'approved' && run.status !== 'finalized') {
+        return res.status(400).json({ message: `Cannot export ACH for ${run.status} run; approve or finalize first` });
+      }
+      const originator = await payrollStorage.getAchOriginator(tenantId);
+      if (!originator) {
+        return res.status(400).json({ message: 'ACH originator profile not configured. Set company id, ODFI, and immediate origin/destination first.' });
+      }
+      const items = await payrollStorage.listRunItems(tenantId, run.id);
+      const employees = await payrollStorage.listEmployees(tenantId, true);
+      const byId = new Map(employees.map(e => [e.id, e]));
+      const entries: NachaEntry[] = [];
+      const skipped: Array<{ employeeId: string; reason: string }> = [];
+      for (const it of items) {
+        if (it.netPayCents <= 0) continue;
+        const emp = byId.get(it.employeeId);
+        if (!emp) { skipped.push({ employeeId: it.employeeId, reason: 'employee_not_found' }); continue; }
+        if (!emp.bankRoutingNumber || !emp.bankAccountNumberEnc || !emp.bankAccountType) {
+          skipped.push({ employeeId: it.employeeId, reason: 'missing_bank_info' });
+          continue;
+        }
+        entries.push({
+          employeeName: `${emp.firstName} ${emp.lastName}`.toUpperCase(),
+          employeeId: emp.externalEmployeeNumber || emp.id.slice(0, 15),
+          routingNumber: emp.bankRoutingNumber,
+          accountNumber: emp.bankAccountNumberEnc, // TODO: decrypt
+          accountType: emp.bankAccountType === 'savings' ? 'savings' : 'checking',
+          amountCents: it.netPayCents,
+        });
+      }
+      if (entries.length === 0) {
+        return res.status(400).json({ message: 'No employees with bank info on this run', skipped });
+      }
+      const effectiveDate = run.payDate.replace(/-/g, '').slice(2); // YYMMDD
+      const file = buildNachaFile({
+        companyName: originator.companyName,
+        companyId: originator.companyId,
+        originatingDfi: originator.originatingDfi,
+        immediateOriginName: originator.immediateOriginName,
+        immediateOrigin: originator.immediateOrigin,
+        immediateDestinationName: originator.immediateDestinationName,
+        immediateDestination: originator.immediateDestination,
+      }, entries, effectiveDate);
+      await payrollStorage.appendAudit({
+        tenantId, actorUserId: (req.user as any)?.id,
+        action: 'run.ach_export', entityType: 'run', entityId: run.id,
+        details: { entryCount: file.entryCount, totalCents: file.totalCents, skipped },
+        ipAddress: req.ip,
+      });
+      res.setHeader('Content-Type', 'text/plain');
+      res.setHeader('Content-Disposition', `attachment; filename="payroll-ach-${run.id}.ach"`);
+      res.setHeader('X-Ach-Entry-Count', String(file.entryCount));
+      res.setHeader('X-Ach-Total-Cents', String(file.totalCents));
+      res.send(file.content);
     } catch (e: any) { res.status(500).json({ message: e.message }); }
   });
 
