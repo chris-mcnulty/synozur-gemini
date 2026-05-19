@@ -457,6 +457,37 @@ export function registerPayrollRoutes(app: Express, deps: PayrollRouteDeps) {
     } catch (e: any) { res.status(500).json({ message: e.message }); }
   });
 
+  // ---- Tax-filing totals (drives 941 quarterly + W-2 / 1099 annual prep) ----
+  app.get('/api/payroll/tax-totals', requireAuth, PM, async (req, res) => {
+    try {
+      const tenantId = tenantOf(req);
+      const q = z.object({
+        period: z.enum(['quarter', 'year', 'custom']).default('quarter'),
+        year: z.coerce.number().int().optional(),
+        quarter: z.coerce.number().int().min(1).max(4).optional(),
+        startDate: z.string().optional(),
+        endDate: z.string().optional(),
+      }).parse(req.query);
+      let startDate: string, endDate: string;
+      if (q.period === 'custom') {
+        if (!q.startDate || !q.endDate) return res.status(400).json({ message: 'startDate and endDate required for custom period' });
+        startDate = q.startDate; endDate = q.endDate;
+      } else if (q.period === 'year') {
+        const y = q.year ?? new Date().getUTCFullYear();
+        startDate = `${y}-01-01`; endDate = `${y}-12-31`;
+      } else {
+        const y = q.year ?? new Date().getUTCFullYear();
+        const qn = q.quarter ?? Math.floor(new Date().getUTCMonth() / 3) + 1;
+        const startMonth = (qn - 1) * 3 + 1;
+        const endMonth = startMonth + 2;
+        const lastDay = new Date(Date.UTC(y, endMonth, 0)).getUTCDate();
+        startDate = `${y}-${String(startMonth).padStart(2, '0')}-01`;
+        endDate = `${y}-${String(endMonth).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`;
+      }
+      res.json(await payrollStorage.taxTotals(tenantId, startDate, endDate));
+    } catch (e: any) { res.status(400).json({ message: e.message }); }
+  });
+
   // ---- Self-service: an employee can see their own finalized paystubs ----
   // No PAYROLL_MANAGER gate — any authenticated user with a linked payroll
   // record can see their own pay history. Tenant is derived from the session

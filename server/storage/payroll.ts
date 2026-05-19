@@ -464,6 +464,10 @@ export const payrollStorage = {
       .set({ status: 'finalized', finalizedAt: new Date() })
       .where(and(eq(payrollRuns.tenantId, tenantId), eq(payrollRuns.id, runId)))
       .returning();
+    // Tie PTO accrual to finalize so previews / approvals can be replayed
+    // without affecting balances. Errors here surface to the caller; the
+    // alternative (silent failure) would let balances drift.
+    await this.accruePtoForRun(tenantId, runId);
     return row;
   },
 
@@ -573,6 +577,112 @@ export const payrollStorage = {
     // Employer tax liability mirrors employer tax expense.
     push('employer_tax_liability', 0, employerTax);
     return out;
+  },
+
+  // ---- Tax-filing totals (quarterly 941 / annual W-2 + 1099) ----
+  /**
+   * Aggregate finalized-run totals for a date window. Drives 941 quarterly
+   * filings (federal income tax withheld + FICA wages and tax) and the
+   * annual W-2/1099 summary. Not a tax-form generator — accountants take
+   * these totals into their filing software.
+   */
+  async taxTotals(tenantId: string, startDate: string, endDate: string) {
+    const rows = await db.select({
+      employeeId: payrollRunItems.employeeId,
+      employeeType: payrollEmployees.employeeType,
+      firstName: payrollEmployees.firstName,
+      lastName: payrollEmployees.lastName,
+      email: payrollEmployees.email,
+      grossCents: payrollRunItems.grossCents,
+      preTaxDeductionCents: payrollRunItems.preTaxDeductionCents,
+      employeeTaxCents: payrollRunItems.employeeTaxCents,
+      employerTaxCents: payrollRunItems.employerTaxCents,
+      netPayCents: payrollRunItems.netPayCents,
+      breakdown: payrollRunItems.breakdown,
+      payDate: payrollRuns.payDate,
+    })
+      .from(payrollRunItems)
+      .innerJoin(payrollRuns, eq(payrollRunItems.runId, payrollRuns.id))
+      .innerJoin(payrollEmployees, eq(payrollRunItems.employeeId, payrollEmployees.id))
+      .where(and(
+        eq(payrollRunItems.tenantId, tenantId),
+        eq(payrollRuns.status, 'finalized'),
+        gte(payrollRuns.payDate, startDate),
+        lte(payrollRuns.payDate, endDate),
+      ));
+
+    const byEmployee = new Map<string, any>();
+    let fedIncomeWithheld = 0, ssWagesTotal = 0, medicareWagesTotal = 0;
+    let employerSsTotal = 0, employerMedicareTotal = 0;
+
+    for (const r of rows) {
+      const lines = (r.breakdown as any)?.lines ?? [];
+      const fed = lines.filter((l: any) => l.label === 'Federal income tax').reduce((s: number, l: any) => s + Math.abs(l.amountCents), 0);
+      const taxableWages = r.grossCents - r.preTaxDeductionCents;
+      const ssLine = lines.find((l: any) => l.label === 'Social Security');
+      const medicareLine = lines.find((l: any) => l.label === 'Medicare');
+      const employerSs = lines.filter((l: any) => l.label === 'Employer SS').reduce((s: number, l: any) => s + l.amountCents, 0);
+      const employerMc = lines.filter((l: any) => l.label === 'Employer Medicare').reduce((s: number, l: any) => s + l.amountCents, 0);
+
+      fedIncomeWithheld += fed;
+      ssWagesTotal += ssLine ? Math.round(Math.abs(ssLine.amountCents) / 0.062) : 0;
+      medicareWagesTotal += taxableWages;
+      employerSsTotal += employerSs;
+      employerMedicareTotal += employerMc;
+
+      const e = byEmployee.get(r.employeeId) ?? {
+        employeeId: r.employeeId, name: `${r.firstName} ${r.lastName}`, email: r.email,
+        employeeType: r.employeeType,
+        grossCents: 0, taxableWagesCents: 0, fedIncomeTaxCents: 0,
+        ssWagesCents: 0, medicareWagesCents: 0, netPayCents: 0,
+      };
+      e.grossCents += r.grossCents;
+      e.taxableWagesCents += taxableWages;
+      e.fedIncomeTaxCents += fed;
+      e.ssWagesCents += ssLine ? Math.round(Math.abs(ssLine.amountCents) / 0.062) : 0;
+      e.medicareWagesCents += taxableWages;
+      e.netPayCents += r.netPayCents;
+      byEmployee.set(r.employeeId, e);
+    }
+
+    const employees = Array.from(byEmployee.values());
+    return {
+      window: { startDate, endDate },
+      totals: {
+        fedIncomeTaxWithheldCents: fedIncomeWithheld,
+        ssWagesCents: ssWagesTotal,
+        medicareWagesCents: medicareWagesTotal,
+        employerSsCents: employerSsTotal,
+        employerMedicareCents: employerMedicareTotal,
+      },
+      w2Employees: employees.filter(e => e.employeeType === 'w2'),
+      form1099Recipients: employees.filter(e => e.employeeType === '1099'),
+    };
+  },
+
+  // ---- PTO accrual on finalize ----
+  /**
+   * Accrue per-period PTO and decrement balances by hours used in the run.
+   * Called from finalizeRun so accrual is tied to the audit-immutable point
+   * (preview/approve can be re-run without affecting balances).
+   */
+  async accruePtoForRun(tenantId: string, runId: string): Promise<void> {
+    const items = await this.listRunItems(tenantId, runId);
+    for (const it of items) {
+      const pto = await db.select().from(payrollPtoBalances)
+        .where(and(eq(payrollPtoBalances.tenantId, tenantId), eq(payrollPtoBalances.employeeId, it.employeeId)));
+      for (const p of pto) {
+        const accrual = Number(p.accrualHoursPerPeriod);
+        const used = Number(it.ptoHoursUsed ?? 0);
+        const newBalance = Math.max(0, Number(p.balanceHours) + accrual - used);
+        const newYtdUsed = Number(p.usedHoursYtd) + used;
+        await db.update(payrollPtoBalances).set({
+          balanceHours: String(newBalance),
+          usedHoursYtd: String(newYtdUsed),
+          updatedAt: new Date(),
+        }).where(eq(payrollPtoBalances.id, p.id));
+      }
+    }
   },
 
   // ---- Self-service: an employee's own finalized paystubs ----

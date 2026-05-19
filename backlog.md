@@ -1,7 +1,44 @@
 # Constellation Product Backlog
 
-**Last Updated**: May 7, 2026
-**Version**: 7.1 — v2.5 release: Galaxy Client Portal API, Notifications System, Multi-Currency Estimates, Time Grid 2.0, Estimate Version History, Client Portal Approvals & Sign-offs, Payment Milestone Billing Automation, AI Project Manager Agent, Planner LWW. Notifications System (previously deprioritized) marked ✅ Complete. Copilot Write Phases 0–5 fully shipped.
+**Last Updated**: May 19, 2026
+**Version**: 7.2 — Adds Payroll integration sweep (users ↔ payroll_employees auto-provisioning, time-tracking hours feed, YTD/HoH tax correctness, NACHA disbursement export, employee self-service paystubs, quarterly tax totals, PTO accrual on finalize). Remaining payroll P1 work captured below.
+
+---
+
+## 🚧 In Progress — Payroll P1 Remediation (May 2026)
+
+The payroll module shipped with full schema, calc engine, and run workflow
+but several integration and correctness gaps blocked using it in production.
+The current sweep closes the highest-impact gaps; remaining items below.
+
+**Completed in this sweep:**
+- [x] Users ↔ Payroll auto-provisioning (`users.payrollEmployeeType`)
+- [x] Bi-directional UI surface (payroll badge on users page, linked-user pill on payroll page)
+- [x] Payroll runs pull hours from approved/submitted time entries (FLSA OT split per ISO week)
+- [x] True YTD accumulators for SS wage base, additional Medicare, FUTA cap
+- [x] Head-of-household federal bracket table
+- [x] NACHA / ACH PPD credit file export for approved/finalized runs
+- [x] Per-tenant ACH originator profile
+- [x] Bank routing/account/type capture on employee detail
+- [x] Full W-4 capture UI (filing status, multi-jobs, dependents, deductions, extra withholding)
+- [x] Tax totals endpoint (`/api/payroll/tax-totals?period=quarter|year|custom`)
+- [x] PTO accrual + decrement hooked into `finalizeRun`
+- [x] Employee self-service paystubs (`/me/paystubs` + `/me/paystubs/:runId`)
+
+**Remaining P1 (in priority order):**
+- [ ] **Encrypted bank account storage** — `bankAccountNumberEnc` column exists but currently holds plain text. Wire envelope encryption (KMS / per-tenant key) before processing real direct deposits. Decrypt only in the NACHA generator.
+- [ ] **W-4 multiple-jobs adjustment in withholding** — checkbox is captured and persisted, but the engine does not yet adjust withholding when set. IRS Pub 15-T provides a separate bracket table; implement.
+- [ ] **State income tax matrix** — engine supports a rule-driven `flat_percent` mode only. Add bracket-based withholding for CA (DE-4), NY (IT-2104), and the top 10 states by headcount; add local taxes for NYC and Philadelphia.
+- [ ] **SUTA per jurisdiction** — currently only FUTA is computed. Add state unemployment with per-state rate + wage base.
+- [ ] **Section 125 / 401(k) FICA treatment** — the engine treats all pre-tax deductions as FICA-exempt for simplicity. 401(k) deferrals are FICA-taxable; health/HSA pre-tax are not. Split the deduction model.
+- [ ] **941 quarterly filing PDF + Schedule B** — tax-totals endpoint provides the numbers; generate the actual 941 PDF and semi-weekly deposit schedule.
+- [ ] **W-2 / W-3 / 1099-NEC artifact generation** — produce the SSA EFW2 (e-file W-2) and IRS 1099 forms from year totals.
+- [ ] **Reversal / off-cycle runs** — `void` only works pre-finalize. Add a negative-amount reversal run for finalized payroll, plus off-cycle bonus / commission run UX.
+- [ ] **Reciprocity & multi-state withholding** — when home and work states differ, apply reciprocity rules (NJ/PA, IL/IN, etc.) and split withholding.
+- [ ] **Per-period accruals other than PTO** — sick leave, parental leave, jury duty caps.
+- [ ] **Garnishment splits** — engine collapses garnishments into post-tax bucket; expose separate GL category and Title III priority ordering.
+- [ ] **Payment cycle SLA monitoring** — alert when a scheduled run has not been previewed/approved within N days of pay date.
+- [ ] **Audit log retention + export** — currently append-only with no retention policy or exportable evidence package.
 
 ---
 
