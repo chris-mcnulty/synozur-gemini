@@ -137,6 +137,41 @@ export const payrollStorage = {
   },
 
   /**
+   * Sum YTD taxable wages from FINALIZED payroll runs in the same calendar
+   * year as `payDate`, EXCLUDING any run with payDate >= the run we're
+   * previewing (so re-previewing an earlier period doesn't double-count later
+   * finalized runs).
+   *
+   * For our simplified engine, SS / Medicare / FUTA wage bases are all equal
+   * to "gross − pre-tax deductions" — Section 125 differences are not modeled.
+   * Returns 0/0/0 when the employee has no prior finalized runs in the year.
+   */
+  async getYtdAccumulators(
+    tenantId: string,
+    employeeId: string,
+    payDate: string,
+  ): Promise<{ ytdSsWagesCents: number; ytdMedicareWagesCents: number; ytdFutaWagesCents: number }> {
+    const year = payDate.slice(0, 4);
+    const yearStart = `${year}-01-01`;
+    const rows = await db.select({
+      gross: payrollRunItems.grossCents,
+      preTax: payrollRunItems.preTaxDeductionCents,
+    })
+      .from(payrollRunItems)
+      .innerJoin(payrollRuns, eq(payrollRunItems.runId, payrollRuns.id))
+      .where(and(
+        eq(payrollRunItems.tenantId, tenantId),
+        eq(payrollRunItems.employeeId, employeeId),
+        eq(payrollRuns.status, 'finalized'),
+        gte(payrollRuns.payDate, yearStart),
+        lte(payrollRuns.payDate, payDate),
+      ));
+    let total = 0;
+    for (const r of rows) total += (r.gross ?? 0) - (r.preTax ?? 0);
+    return { ytdSsWagesCents: total, ytdMedicareWagesCents: total, ytdFutaWagesCents: total };
+  },
+
+  /**
    * Sum approved/submitted time-tracking hours for a user within a pay period
    * and split into regular vs overtime by ISO-week (FLSA: hours > 40 in a week
    * are overtime). Returns 0/0 if the user has no time entries in the window.
@@ -354,6 +389,7 @@ export const payrollStorage = {
       const finalOvertimeHours = overrides.overtimeHours
         ?? (sourcedFromTimesheets ? tsOvertime : 0);
 
+      const ytd = await this.getYtdAccumulators(tenantId, emp.id, run.payDate);
       const result = computePayroll({
         employee: emp,
         compensation: comp,
@@ -366,6 +402,9 @@ export const payrollStorage = {
         bonusCents: overrides.bonusCents ?? 0,
         commissionCents: overrides.commissionCents ?? 0,
         retroPayCents: overrides.retroPayCents ?? 0,
+        ytdSsWagesCents: ytd.ytdSsWagesCents,
+        ytdMedicareWagesCents: ytd.ytdMedicareWagesCents,
+        ytdFutaWagesCents: ytd.ytdFutaWagesCents,
       });
       const [item] = await db.insert(payrollRunItems).values({
         tenantId, runId,

@@ -32,6 +32,13 @@ export interface PayrollEngineInputs {
   bonusCents: number;
   commissionCents: number;
   retroPayCents: number;
+  // YTD accumulators (cents) — sums of taxable wages from finalized runs in
+  // the same calendar year, EXCLUDING the current period. Used to apply true
+  // YTD caps for SS wage base, additional Medicare threshold, and FUTA cap.
+  // Default to 0 (treat as first run of the year) when omitted.
+  ytdSsWagesCents?: number;
+  ytdMedicareWagesCents?: number;
+  ytdFutaWagesCents?: number;
 }
 
 export interface PayrollLine {
@@ -82,6 +89,17 @@ const FED_BRACKETS_MARRIED: Bracket[] = [
   { upToCents: 48745000, ratePct: 32, baseCents: 7809500 },
   { upToCents: 73095000, ratePct: 35, baseCents: 11140700 },
   { upToCents: null,     ratePct: 37, baseCents: 19663200 },
+];
+
+// 2024 head-of-household income tax brackets (annualized, cents).
+const FED_BRACKETS_HOH: Bracket[] = [
+  { upToCents: 1660000,  ratePct: 10, baseCents: 0 },
+  { upToCents: 6320000,  ratePct: 12, baseCents: 166000 },
+  { upToCents: 10050000, ratePct: 22, baseCents: 725200 },
+  { upToCents: 19180000, ratePct: 24, baseCents: 1546800 },
+  { upToCents: 24385000, ratePct: 32, baseCents: 3738000 },
+  { upToCents: 60935000, ratePct: 35, baseCents: 5403600 },
+  { upToCents: null,     ratePct: 37, baseCents: 18195100 },
 ];
 
 // Social Security: 6.2% employee + 6.2% employer, wage base 2024 = $168,600.
@@ -176,18 +194,31 @@ export function computePayroll(inp: PayrollEngineInputs): PayrollEngineResult {
   // ---- Federal income tax withholding (annualized brackets) ----
   const periods = PERIODS_PER_YEAR[inp.schedule.frequency] ?? 26;
   const annualTaxable = taxableWages * periods - (inp.employee.w4DeductionsCents ?? 0);
-  const brackets = inp.employee.filingStatus === 'married_jointly' ? FED_BRACKETS_MARRIED : FED_BRACKETS_SINGLE;
+  const brackets = inp.employee.filingStatus === 'married_jointly' ? FED_BRACKETS_MARRIED
+    : inp.employee.filingStatus === 'head_of_household' ? FED_BRACKETS_HOH
+    : FED_BRACKETS_SINGLE;
   const annualFed = Math.max(0, applyBrackets(annualTaxable, brackets) - (inp.employee.w4DependentsAmountCents ?? 0));
   const fedWithholding = Math.round(annualFed / periods) + (inp.employee.w4ExtraWithholdingCents ?? 0);
   if (fedWithholding > 0) lines.push({ category: 'employee_tax', label: 'Federal income tax', amountCents: -fedWithholding });
 
   // ---- FICA: Social Security + Medicare (employee side) ----
-  const ssWageBasePerPeriod = Math.round(SS_WAGE_BASE_CENTS / periods);
-  const ssWages = Math.min(taxableWages, ssWageBasePerPeriod);
+  // Use true YTD accumulators for the SS wage base cap and additional Medicare
+  // threshold. Per-period approximations produce wrong totals mid-year when
+  // wages vary or when bonuses push an employee over a cap.
+  const ytdSs = inp.ytdSsWagesCents ?? 0;
+  const ssRemaining = Math.max(0, SS_WAGE_BASE_CENTS - ytdSs);
+  const ssWages = Math.min(taxableWages, ssRemaining);
   const employeeSS = pctOfCents(ssWages, SS_RATE_PCT);
   const employeeMedicare = pctOfCents(taxableWages, MEDICARE_RATE_PCT);
-  const employeeAddlMedicare = taxableWages * periods > MEDICARE_ADDL_THRESHOLD_CENTS
-    ? pctOfCents(taxableWages, MEDICARE_ADDL_RATE_PCT)
+  const ytdMedicare = inp.ytdMedicareWagesCents ?? 0;
+  const newMedicareYtd = ytdMedicare + taxableWages;
+  // Additional Medicare 0.9% applies only on wages above $200k YTD; charge
+  // the surtax only on the portion of this period that crosses the threshold.
+  const addlMedicareWages = newMedicareYtd > MEDICARE_ADDL_THRESHOLD_CENTS
+    ? Math.min(taxableWages, newMedicareYtd - MEDICARE_ADDL_THRESHOLD_CENTS)
+    : 0;
+  const employeeAddlMedicare = addlMedicareWages > 0
+    ? pctOfCents(addlMedicareWages, MEDICARE_ADDL_RATE_PCT)
     : 0;
   if (employeeSS) lines.push({ category: 'employee_tax', label: 'Social Security', amountCents: -employeeSS });
   if (employeeMedicare) lines.push({ category: 'employee_tax', label: 'Medicare', amountCents: -employeeMedicare });
@@ -213,8 +244,11 @@ export function computePayroll(inp: PayrollEngineInputs): PayrollEngineResult {
   // ---- Employer-side taxes (do not reduce net pay; tracked for liability/GL) ----
   const employerSS = pctOfCents(ssWages, SS_RATE_PCT);
   const employerMedicare = pctOfCents(taxableWages, MEDICARE_RATE_PCT);
-  // FUTA: 6% on first $7,000 wages, but most employers get 5.4% credit → 0.6%.
-  const futa = pctOfCents(Math.min(taxableWages, Math.round(700000 / periods)), 0.6);
+  // FUTA: 6% on first $7,000 wages per employee per year, but most employers
+  // get the 5.4% state credit → 0.6%. Apply against true YTD, not per-period.
+  const ytdFuta = inp.ytdFutaWagesCents ?? 0;
+  const futaRemaining = Math.max(0, 700000 - ytdFuta);
+  const futa = pctOfCents(Math.min(taxableWages, futaRemaining), 0.6);
   // TODO: state unemployment (SUTA) by jurisdiction.
   let employerStateLocal = 0;
   for (const j of inp.jurisdictions.filter(x => x.isActive)) {
