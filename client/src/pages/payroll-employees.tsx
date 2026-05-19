@@ -19,11 +19,31 @@ export default function PayrollEmployees() {
   const { toast } = useToast();
   const { data: employees, isLoading } = useQuery<any[]>({ queryKey: ["/api/payroll/employees"] });
   const { data: schedules } = useQuery<any[]>({ queryKey: ["/api/payroll/schedules"] });
+  const { data: eligibleUsers } = useQuery<Array<{ id: string; name: string; email: string }>>({ queryKey: ["/api/payroll/eligible-users"] });
+
+  function selectUser(userId: string) {
+    if (userId === 'none') {
+      setForm((f: any) => ({ ...f, userId: null }));
+      return;
+    }
+    const u = (eligibleUsers || []).find(x => x.id === userId);
+    if (!u) return;
+    const [first, ...rest] = (u.name || '').split(' ');
+    setForm((f: any) => ({
+      ...f,
+      userId: u.id,
+      email: u.email,
+      firstName: f.firstName || first || '',
+      lastName: f.lastName || rest.join(' ') || '',
+    }));
+  }
 
   const create = useMutation({
     mutationFn: (data: any) => apiRequest("/api/payroll/employees", { method: "POST", body: JSON.stringify(data) }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/payroll/employees"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/payroll/eligible-users"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/users"] });
       setOpen(false); setForm({ employeeType: 'w2', status: 'onboarding', filingStatus: 'single' });
       toast({ title: "Employee added" });
     },
@@ -45,6 +65,19 @@ export default function PayrollEmployees() {
             <DialogContent className="max-w-2xl">
               <DialogHeader><DialogTitle>Onboard a new person</DialogTitle></DialogHeader>
               <div className="grid grid-cols-2 gap-4 py-2">
+                <div className="col-span-2">
+                  <Label>Link to internal user (optional)</Label>
+                  <Select value={form.userId || 'none'} onValueChange={selectUser}>
+                    <SelectTrigger data-testid="select-link-user"><SelectValue placeholder="Not linked — create standalone payroll record" /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="none">Not linked</SelectItem>
+                      {(eligibleUsers || []).map(u => (
+                        <SelectItem key={u.id} value={u.id}>{u.name} — {u.email}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <p className="text-xs text-muted-foreground mt-1">Picking a user pre-fills the form and links the two records so you don't have duplicates.</p>
+                </div>
                 <div><Label>First name</Label><Input value={form.firstName || ''} onChange={e => setForm({ ...form, firstName: e.target.value })} data-testid="input-first-name" /></div>
                 <div><Label>Last name</Label><Input value={form.lastName || ''} onChange={e => setForm({ ...form, lastName: e.target.value })} data-testid="input-last-name" /></div>
                 <div className="col-span-2"><Label>Email</Label><Input value={form.email || ''} onChange={e => setForm({ ...form, email: e.target.value })} data-testid="input-email" /></div>
@@ -95,7 +128,7 @@ export default function PayrollEmployees() {
               !employees || employees.length === 0 ? <div className="text-sm text-muted-foreground">No people yet.</div> : (
               <table className="w-full text-sm">
                 <thead className="text-left text-muted-foreground border-b">
-                  <tr><th className="py-2">Name</th><th>Email</th><th>Type</th><th>Status</th><th>Hired</th><th></th></tr>
+                  <tr><th className="py-2">Name</th><th>Email</th><th>Type</th><th>Status</th><th>Linked user</th><th>Hired</th><th></th></tr>
                 </thead>
                 <tbody>
                   {employees.map(e => (
@@ -104,6 +137,15 @@ export default function PayrollEmployees() {
                       <td>{e.email}</td>
                       <td><span className="px-2 py-0.5 text-xs rounded bg-accent">{e.employeeType}</span></td>
                       <td><span className="px-2 py-0.5 text-xs rounded bg-accent">{e.status}</span></td>
+                      <td>
+                        {e.linkedUser ? (
+                          <Link href={`/users?highlight=${e.linkedUser.id}`}>
+                            <span className="text-primary underline cursor-pointer" data-testid={`link-user-${e.id}`}>{e.linkedUser.name}</span>
+                          </Link>
+                        ) : (
+                          <span className="text-muted-foreground text-xs">unlinked</span>
+                        )}
+                      </td>
                       <td>{fmtDate(e.hireDate)}</td>
                       <td className="text-right"><Link href={`/payroll/employees/${e.id}`}><Button variant="link" size="sm">Open</Button></Link></td>
                     </tr>

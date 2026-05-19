@@ -54,7 +54,16 @@ export function registerPayrollRoutes(app: Express, deps: PayrollRouteDeps) {
     try {
       const includeTerminated = req.query.includeTerminated === 'true';
       const list = await payrollStorage.listEmployees(tenantOf(req), includeTerminated);
-      res.json(list);
+      const enriched = await payrollStorage.enrichWithUsers(list);
+      res.json(enriched);
+    } catch (e: any) { res.status(500).json({ message: e.message }); }
+  });
+
+  // Candidate internal users (active, with email) that aren't yet linked to a
+  // payroll employee — used to populate the "Add person" picker.
+  app.get('/api/payroll/eligible-users', requireAuth, PM, async (req, res) => {
+    try {
+      res.json(await payrollStorage.listEligibleUsers(tenantOf(req)));
     } catch (e: any) { res.status(500).json({ message: e.message }); }
   });
 
@@ -63,10 +72,11 @@ export function registerPayrollRoutes(app: Express, deps: PayrollRouteDeps) {
       const tenantId = tenantOf(req);
       const emp = await payrollStorage.getEmployee(tenantId, req.params.id);
       if (!emp) return res.status(404).json({ message: 'Not found' });
+      const [enriched] = await payrollStorage.enrichWithUsers([emp]);
       const compensation = await payrollStorage.listCompensation(tenantId, emp.id);
       const deductions = await payrollStorage.listDeductions(tenantId, emp.id);
       const pto = await payrollStorage.listPto(tenantId, emp.id);
-      res.json({ employee: emp, compensation, deductions, pto });
+      res.json({ employee: enriched, compensation, deductions, pto });
     } catch (e: any) { res.status(500).json({ message: e.message }); }
   });
 
@@ -74,11 +84,26 @@ export function registerPayrollRoutes(app: Express, deps: PayrollRouteDeps) {
     try {
       const tenantId = tenantOf(req);
       const body = insertPayrollEmployeeSchema.parse({ ...req.body, tenantId });
+      // If linked to an internal user, prevent duplicate active payroll rows
+      // for the same person.
+      if (body.userId) {
+        const existing = await payrollStorage.findEmployeeByUserId(tenantId, body.userId);
+        if (existing) {
+          return res.status(409).json({
+            message: 'This user is already enrolled in payroll',
+            payrollEmployeeId: existing.id,
+          });
+        }
+      }
       const emp = await payrollStorage.createEmployee(body);
+      // Keep the user row's payroll flag consistent so both sides agree.
+      if (emp.userId) {
+        await payrollStorage.syncUserEnrollmentFlag(emp.userId, emp.employeeType);
+      }
       await payrollStorage.appendAudit({
         tenantId, actorUserId: (req.user as any)?.id,
         action: 'employee.create', entityType: 'employee', entityId: emp.id,
-        details: { email: emp.email }, ipAddress: req.ip,
+        details: { email: emp.email, userId: emp.userId }, ipAddress: req.ip,
       });
       res.json(emp);
     } catch (e: any) { res.status(400).json({ message: e.message }); }

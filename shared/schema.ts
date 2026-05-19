@@ -275,6 +275,10 @@ export const users = pgTable("users", {
   weeklyDigestEnabled: boolean("weekly_digest_enabled").notNull().default(true),
   weeklyDigestDay: integer("weekly_digest_day").notNull().default(1), // 1=Monday … 7=Sunday
   weeklyDigestTime: varchar("weekly_digest_time", { length: 5 }).notNull().default("08:00"), // HH:MM
+  // Payroll enrollment: when non-null, an internal user is enrolled in payroll
+  // and a linked payroll_employees row is provisioned automatically. Clearing
+  // the value marks the linked employee 'terminated' (no cascade delete).
+  payrollEmployeeType: varchar("payroll_employee_type", { length: 16 }), // 'w2' | '1099' | null
   createdAt: timestamp("created_at").notNull().default(sql`now()`),
 });
 
@@ -4392,6 +4396,7 @@ export const payrollEmployees = pgTable("payroll_employees", {
 }, (t) => ({
   tenantIdx: index("idx_payroll_emp_tenant").on(t.tenantId),
   emailIdx: index("idx_payroll_emp_email").on(t.tenantId, t.email),
+  userIdx: index("idx_payroll_emp_user").on(t.userId),
 }));
 
 export const insertPayrollEmployeeSchema = createInsertSchema(payrollEmployees).omit({

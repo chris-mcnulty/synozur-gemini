@@ -6,11 +6,11 @@
  */
 
 import { db } from "../db";
-import { and, eq, desc, gte, lte, isNull, sql } from "drizzle-orm";
+import { and, eq, desc, gte, lte, isNull, isNotNull, inArray, sql, notInArray } from "drizzle-orm";
 import {
   payrollEmployees, payrollCompensation, payrollPaySchedules, payrollDeductions,
   payrollRuns, payrollRunItems, payrollGlAccounts, payrollGlMappings,
-  payrollAuditLog, payrollTaxJurisdictions, payrollPtoBalances,
+  payrollAuditLog, payrollTaxJurisdictions, payrollPtoBalances, users, tenantUsers,
   type PayrollEmployee, type InsertPayrollEmployee,
   type PayrollCompensation, type InsertPayrollCompensation,
   type PayrollPaySchedule, type InsertPayrollPaySchedule,
@@ -68,9 +68,72 @@ export const payrollStorage = {
   },
 
   async softDeleteEmployee(tenantId: string, id: string): Promise<void> {
-    await db.update(payrollEmployees)
+    const [row] = await db.update(payrollEmployees)
       .set({ deletedAt: new Date(), status: 'terminated' })
-      .where(and(eq(payrollEmployees.tenantId, tenantId), eq(payrollEmployees.id, id)));
+      .where(and(eq(payrollEmployees.tenantId, tenantId), eq(payrollEmployees.id, id)))
+      .returning({ userId: payrollEmployees.userId });
+    if (row?.userId) {
+      await db.update(users).set({ payrollEmployeeType: null as any }).where(eq(users.id, row.userId));
+    }
+  },
+
+  /** Locate the active (non-soft-deleted) payroll record for a given user. */
+  async findEmployeeByUserId(tenantId: string, userId: string): Promise<PayrollEmployee | undefined> {
+    const [row] = await db.select().from(payrollEmployees)
+      .where(and(
+        eq(payrollEmployees.tenantId, tenantId),
+        eq(payrollEmployees.userId, userId),
+        isNull(payrollEmployees.deletedAt),
+      ));
+    return row;
+  },
+
+  /** Attach linked user info (id, name, email) to a list of employees. */
+  async enrichWithUsers<T extends { userId: string | null }>(rows: T[]): Promise<Array<T & { linkedUser: { id: string; name: string; email: string | null } | null }>> {
+    const ids = rows.map(r => r.userId).filter((x): x is string => !!x);
+    if (ids.length === 0) return rows.map(r => ({ ...r, linkedUser: null }));
+    const linked = await db.select({ id: users.id, name: users.name, email: users.email })
+      .from(users).where(inArray(users.id, ids));
+    const byId = new Map(linked.map(u => [u.id, u]));
+    return rows.map(r => ({ ...r, linkedUser: r.userId ? (byId.get(r.userId) ?? null) : null }));
+  },
+
+  /**
+   * Users in this tenant who are eligible to be enrolled in payroll:
+   * active, have an email, are members of the tenant, and don't already have
+   * an active payroll_employees row in this tenant.
+   */
+  async listEligibleUsers(tenantId: string): Promise<Array<{ id: string; name: string; email: string }>> {
+    const alreadyLinked = await db.select({ userId: payrollEmployees.userId })
+      .from(payrollEmployees)
+      .where(and(
+        eq(payrollEmployees.tenantId, tenantId),
+        isNotNull(payrollEmployees.userId),
+        isNull(payrollEmployees.deletedAt),
+      ));
+    const linkedIds = alreadyLinked.map(l => l.userId!).filter(Boolean);
+    const conds = [
+      eq(tenantUsers.tenantId, tenantId),
+      eq(tenantUsers.status, 'active'),
+      eq(users.isActive, true),
+      isNotNull(users.email),
+    ];
+    if (linkedIds.length > 0) conds.push(notInArray(users.id, linkedIds));
+    const rows = await db.select({ id: users.id, name: users.name, email: users.email })
+      .from(users)
+      .innerJoin(tenantUsers, eq(tenantUsers.userId, users.id))
+      .where(and(...conds))
+      .orderBy(users.name);
+    return rows
+      .filter(r => !!r.email)
+      .map(r => ({ id: r.id, name: r.name, email: r.email as string }));
+  },
+
+  /** Keep users.payroll_employee_type aligned when changes originate on the payroll side. */
+  async syncUserEnrollmentFlag(userId: string, employeeType: string | null): Promise<void> {
+    await db.update(users)
+      .set({ payrollEmployeeType: employeeType as any })
+      .where(eq(users.id, userId));
   },
 
   // ---- Compensation ----

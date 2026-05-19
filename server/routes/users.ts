@@ -1,8 +1,25 @@
 import type { Express } from "express";
 import { z } from "zod";
 import { storage, db } from "../storage";
-import { insertUserSchema, tenantUsers, clients, userRoleCapabilities, users, roles, insertUserRoleCapabilitySchema } from "@shared/schema";
-import { eq, and, inArray } from "drizzle-orm";
+import { insertUserSchema, tenantUsers, clients, userRoleCapabilities, users, roles, insertUserRoleCapabilitySchema, payrollEmployees } from "@shared/schema";
+import { eq, and, inArray, isNull } from "drizzle-orm";
+import { syncUserPayrollEnrollment } from "../services/payroll-user-sync";
+
+// Enrich a list of users with a `payrollEmployeeId` field for any user who
+// has an active (non-terminated, not-soft-deleted) linked payroll employee.
+async function enrichWithPayrollLink(rows: any[]): Promise<any[]> {
+  if (rows.length === 0) return rows;
+  const userIds = rows.map(u => u.id);
+  const links = await db.select({ userId: payrollEmployees.userId, id: payrollEmployees.id, status: payrollEmployees.status })
+    .from(payrollEmployees)
+    .where(and(inArray(payrollEmployees.userId, userIds), isNull(payrollEmployees.deletedAt)));
+  const byUser = new Map<string, { id: string; status: string }>();
+  for (const l of links) if (l.userId) byUser.set(l.userId, { id: l.id, status: l.status });
+  return rows.map(u => {
+    const link = byUser.get(u.id);
+    return { ...u, payrollEmployeeId: link?.id ?? null, payrollEmployeeStatus: link?.status ?? null };
+  });
+}
 
 interface UserRouteDeps {
   requireAuth: any;
@@ -71,6 +88,7 @@ export function registerUserRoutes(app: Express, deps: UserRouteDeps) {
         if (currentUser?.role === 'portfolio-manager') {
           enrichedUsers = enrichedUsers.map((u: any) => u.isSalaried ? u : { ...u, defaultCostRate: null });
         }
+        enrichedUsers = await enrichWithPayrollLink(enrichedUsers);
         return res.json(enrichedUsers);
       }
 
@@ -159,6 +177,7 @@ export function registerUserRoutes(app: Express, deps: UserRouteDeps) {
       if (currentUser?.role === 'portfolio-manager') {
         enrichedUsers = enrichedUsers.map((u: any) => u.isSalaried ? u : { ...u, defaultCostRate: null });
       }
+      enrichedUsers = await enrichWithPayrollLink(enrichedUsers);
 
       res.json({
         items: enrichedUsers,
@@ -175,8 +194,20 @@ export function registerUserRoutes(app: Express, deps: UserRouteDeps) {
   app.post("/api/users", deps.requireAuth, deps.requireRole(["admin"]), async (req, res) => {
     try {
       const validatedData = insertUserSchema.parse(req.body);
+      if (validatedData.payrollEmployeeType && !validatedData.email) {
+        return res.status(400).json({ message: "Email is required to enroll a user in payroll" });
+      }
       const user = await storage.createUser(validatedData);
-      res.status(201).json(user);
+      const actor = (req as any).user?.id;
+      try {
+        const { linkedEmployeeId } = await syncUserPayrollEnrollment(user, actor);
+        res.status(201).json({ ...user, payrollEmployeeId: linkedEmployeeId });
+      } catch (syncErr: any) {
+        // Sync failed after user was created — clear the enrollment flag so the
+        // user row and payroll state stay consistent, then surface the error.
+        await storage.updateUser(user.id, { payrollEmployeeType: null } as any);
+        return res.status(400).json({ message: `User created but payroll enrollment failed: ${syncErr.message}` });
+      }
     } catch (error) {
       if (error instanceof z.ZodError) {
         return res.status(400).json({ message: "Invalid user data", errors: error.errors });
@@ -213,11 +244,29 @@ export function registerUserRoutes(app: Express, deps: UserRouteDeps) {
         'customRole', 'roleId', 'contractorBusinessName', 'contractorBusinessAddress',
         'contractorBillingId', 'contractorPhone', 'contractorEmail', 'platformRole',
         'receiveTimeReminders', 'receiveExpenseReminders', 'primaryTenantId',
-        'weeklyCapacityHours', 'capacityNotes', 'capacityEffectiveDate'];
+        'weeklyCapacityHours', 'capacityNotes', 'capacityEffectiveDate',
+        'payrollEmployeeType'];
       const safeBody = Object.fromEntries(Object.entries(body).filter(([k]) => allowedFields.includes(k)));
+      if ('payrollEmployeeType' in safeBody) {
+        const v = safeBody.payrollEmployeeType;
+        if (v !== null && v !== undefined && v !== '' && v !== 'w2' && v !== '1099') {
+          return res.status(400).json({ message: "payrollEmployeeType must be 'w2', '1099', or null" });
+        }
+        if (v === '' || v === undefined) safeBody.payrollEmployeeType = null;
+      }
 
       const user = await storage.updateUser(req.params.id, safeBody as any);
-      res.json(user);
+      let linkedEmployeeId: string | null = null;
+      if ('payrollEmployeeType' in safeBody) {
+        try {
+          ({ linkedEmployeeId } = await syncUserPayrollEnrollment(user, (req as any).user?.id));
+        } catch (syncErr: any) {
+          // Roll back enrollment intent so user state matches payroll state.
+          await storage.updateUser(user.id, { payrollEmployeeType: null } as any);
+          return res.status(400).json({ message: `Payroll enrollment failed: ${syncErr.message}` });
+        }
+      }
+      res.json({ ...user, ...(('payrollEmployeeType' in safeBody) ? { payrollEmployeeId: linkedEmployeeId } : {}) });
     } catch (error) {
       console.error("Error updating user:", error);
       res.status(500).json({ message: "Failed to update user", detail: error instanceof Error ? error.message : String(error) });
