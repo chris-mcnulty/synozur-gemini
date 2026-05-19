@@ -69,7 +69,7 @@ export default function PayrollEmployeeDetail() {
                 const v = fd.get(k); if (!v) return null;
                 return Math.round(Number(v) * 100);
               };
-              patchEmp.mutate({
+              const body: any = {
                 ssnLast4: fd.get('ssnLast4') || null,
                 homeAddress: fd.get('homeAddress') || null,
                 homeCity: fd.get('homeCity') || null,
@@ -83,9 +83,12 @@ export default function PayrollEmployeeDetail() {
                 w4DeductionsCents: num('w4Deductions') ?? 0,
                 w4ExtraWithholdingCents: num('w4ExtraWithholding') ?? 0,
                 bankRoutingNumber: fd.get('bankRoutingNumber') || null,
-                bankAccountNumberEnc: fd.get('bankAccountNumber') || null,
                 bankAccountType: fd.get('bankAccountType') || null,
-              });
+              };
+              const acct = fd.get('bankAccountNumber') as string;
+              // Empty means "don't change", to preserve the encrypted value.
+              if (acct && acct.trim()) body.bankAccountNumberEnc = acct.trim();
+              patchEmp.mutate(body);
             }}>
               <div className="grid grid-cols-2 gap-3">
                 <div><Label>SSN last 4</Label><Input name="ssnLast4" maxLength={4} defaultValue={e.ssnLast4 ?? ''} /></div>
@@ -113,7 +116,11 @@ export default function PayrollEmployeeDetail() {
                 <div><Label>W-4 extra withholding per period ($)</Label><Input name="w4ExtraWithholding" type="number" step="0.01" defaultValue={e.w4ExtraWithholdingCents ? (e.w4ExtraWithholdingCents / 100).toFixed(2) : ''} /></div>
                 <div className="col-span-2 border-t pt-3 mt-2 grid grid-cols-3 gap-3">
                   <div><Label>Bank routing #</Label><Input name="bankRoutingNumber" maxLength={9} defaultValue={e.bankRoutingNumber ?? ''} /></div>
-                  <div><Label>Bank account #</Label><Input name="bankAccountNumber" defaultValue={e.bankAccountNumberEnc ?? ''} /></div>
+                  <div>
+                    <Label>Bank account #{e.hasBankAccount ? ' (replace)' : ''}</Label>
+                    <Input name="bankAccountNumber" defaultValue="" placeholder={e.bankAccountMasked ?? 'enter to set'} />
+                    {e.hasBankAccount && <p className="text-xs text-muted-foreground mt-1">On file: {e.bankAccountMasked}. Leave blank to keep.</p>}
+                  </div>
                   <div><Label>Account type</Label>
                     <Select name="bankAccountType" defaultValue={e.bankAccountType ?? 'checking'}>
                       <SelectTrigger><SelectValue /></SelectTrigger>
@@ -123,7 +130,7 @@ export default function PayrollEmployeeDetail() {
                       </SelectContent>
                     </Select>
                   </div>
-                  <p className="col-span-3 text-xs text-muted-foreground">Account numbers are not yet encrypted at rest. Production deployments must enable encryption before processing real direct deposits.</p>
+                  <p className="col-span-3 text-xs text-muted-foreground">Account numbers are AES-256-GCM encrypted at rest when PAYROLL_ENCRYPTION_KEY is configured. The full number is never shown again after saving.</p>
                 </div>
               </div>
               <div className="mt-4"><Button type="submit" disabled={patchEmp.isPending}>{patchEmp.isPending ? 'Saving…' : 'Save tax & banking'}</Button></div>

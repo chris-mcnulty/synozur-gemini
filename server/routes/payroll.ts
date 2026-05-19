@@ -20,6 +20,7 @@ import {
   insertPayrollGlAccountSchema, insertPayrollAchOriginatorSchema,
 } from "@shared/schema";
 import { buildNachaFile, type NachaEntry } from "../services/nacha";
+import { encryptString, decryptString, maskLast4 } from "../services/crypto";
 
 interface PayrollRouteDeps {
   requireAuth: any;
@@ -77,7 +78,16 @@ export function registerPayrollRoutes(app: Express, deps: PayrollRouteDeps) {
       const compensation = await payrollStorage.listCompensation(tenantId, emp.id);
       const deductions = await payrollStorage.listDeductions(tenantId, emp.id);
       const pto = await payrollStorage.listPto(tenantId, emp.id);
-      res.json({ employee: enriched, compensation, deductions, pto });
+      // Never echo the ciphertext or plain account number to the client;
+      // send a masked display string and a boolean indicating whether one
+      // is on file so the form knows whether to render "Replace" vs "Set".
+      const safeEmployee = {
+        ...enriched,
+        bankAccountNumberEnc: undefined,
+        bankAccountMasked: maskLast4(enriched.bankAccountNumberEnc),
+        hasBankAccount: !!enriched.bankAccountNumberEnc,
+      };
+      res.json({ employee: safeEmployee, compensation, deductions, pto });
     } catch (e: any) { res.status(500).json({ message: e.message }); }
   });
 
@@ -95,6 +105,12 @@ export function registerPayrollRoutes(app: Express, deps: PayrollRouteDeps) {
             payrollEmployeeId: existing.id,
           });
         }
+      }
+      // Encrypt bank account number at the API boundary so plain text never
+      // touches storage. The column is named *Enc so the field stays valid
+      // when encryption is enabled.
+      if (body.bankAccountNumberEnc) {
+        body.bankAccountNumberEnc = encryptString(body.bankAccountNumberEnc) as any;
       }
       const emp = await payrollStorage.createEmployee(body);
       // Keep the user row's payroll flag consistent so both sides agree.
@@ -115,6 +131,9 @@ export function registerPayrollRoutes(app: Express, deps: PayrollRouteDeps) {
       const tenantId = tenantOf(req);
       const body = insertPayrollEmployeeSchema.partial().parse({ ...req.body, tenantId });
       const { tenantId: _t, ...updates } = body;
+      if ('bankAccountNumberEnc' in updates && updates.bankAccountNumberEnc) {
+        updates.bankAccountNumberEnc = encryptString(updates.bankAccountNumberEnc) as any;
+      }
       const emp = await payrollStorage.updateEmployee(tenantId, req.params.id, updates);
       await payrollStorage.appendAudit({
         tenantId, actorUserId: (req.user as any)?.id,
@@ -421,11 +440,17 @@ export function registerPayrollRoutes(app: Express, deps: PayrollRouteDeps) {
           skipped.push({ employeeId: it.employeeId, reason: 'missing_bank_info' });
           continue;
         }
+        // Decrypt at the very last moment, only when actually emitting the
+        // NACHA file. The decrypted value never escapes this scope.
+        let accountNumber: string | null;
+        try { accountNumber = decryptString(emp.bankAccountNumberEnc); }
+        catch { skipped.push({ employeeId: it.employeeId, reason: 'decrypt_failed' }); continue; }
+        if (!accountNumber) { skipped.push({ employeeId: it.employeeId, reason: 'missing_bank_info' }); continue; }
         entries.push({
           employeeName: `${emp.firstName} ${emp.lastName}`.toUpperCase(),
           employeeId: emp.externalEmployeeNumber || emp.id.slice(0, 15),
           routingNumber: emp.bankRoutingNumber,
-          accountNumber: emp.bankAccountNumberEnc, // TODO: decrypt
+          accountNumber,
           accountType: emp.bankAccountType === 'savings' ? 'savings' : 'checking',
           amountCents: it.netPayCents,
         });
