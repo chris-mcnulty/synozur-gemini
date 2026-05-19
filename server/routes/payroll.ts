@@ -21,6 +21,7 @@ import {
 } from "@shared/schema";
 import { buildNachaFile, type NachaEntry } from "../services/nacha";
 import { encryptString, decryptString, maskLast4 } from "../services/crypto";
+import { render941Html, renderW2Csv, renderW3Csv, render1099NecCsv } from "../services/tax-forms";
 
 interface PayrollRouteDeps {
   requireAuth: any;
@@ -526,6 +527,66 @@ export function registerPayrollRoutes(app: Express, deps: PayrollRouteDeps) {
         endDate = `${y}-${String(endMonth).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`;
       }
       res.json(await payrollStorage.taxTotals(tenantId, startDate, endDate));
+    } catch (e: any) { res.status(400).json({ message: e.message }); }
+  });
+
+  // ---- Tax filing artifacts: 941, W-2, W-3, 1099-NEC ----
+  // Each returns a printable HTML (941) or CSV (W-2/W-3/1099) suitable to
+  // hand to an accountant or paste into filing software.
+  app.get('/api/payroll/tax-forms/941', requireAuth, PM, async (req, res) => {
+    try {
+      const tenantId = tenantOf(req);
+      const q = z.object({ year: z.coerce.number().int(), quarter: z.coerce.number().int().min(1).max(4) }).parse(req.query);
+      const startMonth = (q.quarter - 1) * 3 + 1;
+      const endMonth = startMonth + 2;
+      const lastDay = new Date(Date.UTC(q.year, endMonth, 0)).getUTCDate();
+      const startDate = `${q.year}-${String(startMonth).padStart(2, '0')}-01`;
+      const endDate = `${q.year}-${String(endMonth).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`;
+      const totals = await payrollStorage.taxTotals(tenantId, startDate, endDate);
+      const scheduleB = await payrollStorage.scheduleBLiabilities(tenantId, startDate, endDate);
+      const html = render941Html({
+        tenantName: (req.user as any)?.tenantName ?? 'Employer',
+        ein: (req.query.ein as string) || undefined,
+        year: q.year, quarter: q.quarter,
+        totals: totals.totals,
+        w2EmployeeCount: totals.w2Employees.length,
+        scheduleB,
+      });
+      res.setHeader('Content-Type', 'text/html; charset=utf-8');
+      res.send(html);
+    } catch (e: any) { res.status(400).json({ message: e.message }); }
+  });
+
+  app.get('/api/payroll/tax-forms/w2', requireAuth, PM, async (req, res) => {
+    try {
+      const tenantId = tenantOf(req);
+      const year = Number(req.query.year ?? new Date().getUTCFullYear());
+      const totals = await payrollStorage.taxTotals(tenantId, `${year}-01-01`, `${year}-12-31`);
+      res.setHeader('Content-Type', 'text/csv');
+      res.setHeader('Content-Disposition', `attachment; filename="w2-${year}.csv"`);
+      res.send(renderW2Csv(totals as any));
+    } catch (e: any) { res.status(400).json({ message: e.message }); }
+  });
+
+  app.get('/api/payroll/tax-forms/w3', requireAuth, PM, async (req, res) => {
+    try {
+      const tenantId = tenantOf(req);
+      const year = Number(req.query.year ?? new Date().getUTCFullYear());
+      const totals = await payrollStorage.taxTotals(tenantId, `${year}-01-01`, `${year}-12-31`);
+      res.setHeader('Content-Type', 'text/csv');
+      res.setHeader('Content-Disposition', `attachment; filename="w3-${year}.csv"`);
+      res.send(renderW3Csv(totals as any));
+    } catch (e: any) { res.status(400).json({ message: e.message }); }
+  });
+
+  app.get('/api/payroll/tax-forms/1099-nec', requireAuth, PM, async (req, res) => {
+    try {
+      const tenantId = tenantOf(req);
+      const year = Number(req.query.year ?? new Date().getUTCFullYear());
+      const totals = await payrollStorage.taxTotals(tenantId, `${year}-01-01`, `${year}-12-31`);
+      res.setHeader('Content-Type', 'text/csv');
+      res.setHeader('Content-Disposition', `attachment; filename="1099-nec-${year}.csv"`);
+      res.send(render1099NecCsv(totals as any));
     } catch (e: any) { res.status(400).json({ message: e.message }); }
   });
 

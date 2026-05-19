@@ -651,6 +651,45 @@ export const payrollStorage = {
     return out;
   },
 
+  /**
+   * Daily tax-deposit liabilities for Schedule B: one entry per pay date
+   * in the window, summing federal income tax withheld + 6.2% × SS wages
+   * (employee + employer) + 1.45% × Medicare wages (employee + employer).
+   */
+  async scheduleBLiabilities(tenantId: string, startDate: string, endDate: string) {
+    const rows = await db.select({
+      payDate: payrollRuns.payDate,
+      grossCents: payrollRunItems.grossCents,
+      preTaxDeductionCents: payrollRunItems.preTaxDeductionCents,
+      employeeTaxCents: payrollRunItems.employeeTaxCents,
+      employerTaxCents: payrollRunItems.employerTaxCents,
+      breakdown: payrollRunItems.breakdown,
+    })
+      .from(payrollRunItems)
+      .innerJoin(payrollRuns, eq(payrollRunItems.runId, payrollRuns.id))
+      .where(and(
+        eq(payrollRunItems.tenantId, tenantId),
+        eq(payrollRuns.status, 'finalized'),
+        gte(payrollRuns.payDate, startDate),
+        lte(payrollRuns.payDate, endDate),
+      ));
+    const byDate = new Map<string, number>();
+    for (const r of rows) {
+      const lines = ((r.breakdown as any)?.lines ?? []) as Array<{ label: string; amountCents: number }>;
+      const fed = lines.filter(l => l.label === 'Federal income tax').reduce((s, l) => s + Math.abs(l.amountCents), 0);
+      // FICA total = employee + employer halves.
+      const ssEe = lines.find(l => l.label === 'Social Security');
+      const ssEr = lines.find(l => l.label === 'Employer SS');
+      const mcEe = lines.find(l => l.label === 'Medicare');
+      const mcEr = lines.find(l => l.label === 'Employer Medicare');
+      const fica = [ssEe, ssEr, mcEe, mcEr].reduce((s, l) => s + Math.abs(l?.amountCents ?? 0), 0);
+      byDate.set(r.payDate, (byDate.get(r.payDate) ?? 0) + fed + fica);
+    }
+    return Array.from(byDate.entries())
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([date, liabilityCents]) => ({ date, liabilityCents }));
+  },
+
   // ---- Tax-filing totals (quarterly 941 / annual W-2 + 1099) ----
   /**
    * Aggregate finalized-run totals for a date window. Drives 941 quarterly
