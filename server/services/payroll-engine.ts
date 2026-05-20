@@ -19,6 +19,7 @@ import type {
   PayrollPaySchedule,
   PayrollTaxJurisdiction,
 } from "@shared/schema";
+import { resolveWithholdingState } from "./reciprocity";
 
 export interface PayrollEngineInputs {
   employee: PayrollEmployee;
@@ -32,6 +33,16 @@ export interface PayrollEngineInputs {
   bonusCents: number;
   commissionCents: number;
   retroPayCents: number;
+  // Accountable-plan expense reimbursements (Constellation expenses).
+  // Added to net pay AFTER tax math; NEVER part of gross. Default 0.
+  reimbursementCents?: number;
+  // YTD accumulators (cents) — sums of taxable wages from finalized runs in
+  // the same calendar year, EXCLUDING the current period. Used to apply true
+  // YTD caps for SS wage base, additional Medicare threshold, and FUTA cap.
+  // Default to 0 (treat as first run of the year) when omitted.
+  ytdSsWagesCents?: number;
+  ytdMedicareWagesCents?: number;
+  ytdFutaWagesCents?: number;
 }
 
 export interface PayrollLine {
@@ -44,6 +55,10 @@ export interface PayrollEngineResult {
   grossCents: number;
   preTaxDeductionCents: number;
   taxableWagesCents: number;
+  // Wages subject to FICA + FUTA (gross minus Section 125 deductions only —
+  // 401(k) traditional deferrals are still FICA-taxable). Persisted on the
+  // run item so YTD caps + W-2 Box 5 don't have to re-derive it.
+  ficaTaxableWagesCents: number;
   employeeTaxCents: number;
   employerTaxCents: number;
   postTaxDeductionCents: number;
@@ -83,6 +98,27 @@ const FED_BRACKETS_MARRIED: Bracket[] = [
   { upToCents: 73095000, ratePct: 35, baseCents: 11140700 },
   { upToCents: null,     ratePct: 37, baseCents: 19663200 },
 ];
+
+// 2024 head-of-household income tax brackets (annualized, cents).
+const FED_BRACKETS_HOH: Bracket[] = [
+  { upToCents: 1660000,  ratePct: 10, baseCents: 0 },
+  { upToCents: 6320000,  ratePct: 12, baseCents: 166000 },
+  { upToCents: 10050000, ratePct: 22, baseCents: 725200 },
+  { upToCents: 19180000, ratePct: 24, baseCents: 1546800 },
+  { upToCents: 24385000, ratePct: 32, baseCents: 3738000 },
+  { upToCents: 60935000, ratePct: 35, baseCents: 5403600 },
+  { upToCents: null,     ratePct: 37, baseCents: 18195100 },
+];
+
+// 2024 standard deductions (cents). Subtracted from annual wages before
+// applying the income-tax brackets, matching IRS Pub 15-T Worksheet 1A.
+// When W-4 Step 2(c) (multiple jobs / spouse works) is checked, only half
+// the standard deduction applies because both jobs are sharing it.
+const STD_DEDUCTION_CENTS: Record<string, number> = {
+  single: 1460000,
+  married_jointly: 2920000,
+  head_of_household: 2190000,
+};
 
 // Social Security: 6.2% employee + 6.2% employer, wage base 2024 = $168,600.
 const SS_RATE_PCT = 6.2;
@@ -154,6 +190,9 @@ export function computePayroll(inp: PayrollEngineInputs): PayrollEngineResult {
       grossCents,
       preTaxDeductionCents: 0,
       taxableWagesCents: grossCents,
+      // 1099 wages are not FICA-taxable, so the FICA wage base is 0 even
+      // though grossCents is the 1099 payment amount.
+      ficaTaxableWagesCents: 0,
       employeeTaxCents: 0,
       employerTaxCents: 0,
       postTaxDeductionCents: 0,
@@ -162,68 +201,152 @@ export function computePayroll(inp: PayrollEngineInputs): PayrollEngineResult {
     };
   }
 
-  // Pre-tax deductions reduce taxable wages (e.g., 401k, HSA, pre-tax health).
-  let preTaxCents = 0;
+  // Pre-tax deductions reduce taxable wages, but the SCOPE depends on the
+  // tax wrapper. Section 125 cafeteria deductions (preTaxScope='all') are
+  // exempt from federal income tax + FICA + FUTA. 401(k) traditional
+  // (preTaxScope='federal_only') is exempt from federal income tax only;
+  // FICA and FUTA still tax the deferral. We track both buckets so the
+  // FICA wage base is computed correctly.
+  let preTaxAllCents = 0;       // exempt from everything
+  let preTaxFedOnlyCents = 0;   // exempt from federal income tax only
   for (const d of inp.deductions.filter(x => x.isActive && x.deductionType === 'pre_tax')) {
     const amt = d.amountCents ?? (d.percentOfGross ? pctOfCents(grossCents, Number(d.percentOfGross)) : 0);
     if (amt > 0) {
-      preTaxCents += amt;
+      // Default to 'all' for back-compat with rows that predate preTaxScope.
+      const scope = (d as any).preTaxScope ?? 'all';
+      if (scope === 'all') preTaxAllCents += amt;
+      else preTaxFedOnlyCents += amt;
       lines.push({ category: 'pre_tax_deduction', label: d.name, amountCents: -amt });
     }
   }
-  const taxableWages = Math.max(0, grossCents - preTaxCents);
+  const preTaxCents = preTaxAllCents + preTaxFedOnlyCents;
+  const federalTaxableWages = Math.max(0, grossCents - preTaxAllCents - preTaxFedOnlyCents);
+  const ficaTaxableWages = Math.max(0, grossCents - preTaxAllCents);
 
   // ---- Federal income tax withholding (annualized brackets) ----
   const periods = PERIODS_PER_YEAR[inp.schedule.frequency] ?? 26;
-  const annualTaxable = taxableWages * periods - (inp.employee.w4DeductionsCents ?? 0);
-  const brackets = inp.employee.filingStatus === 'married_jointly' ? FED_BRACKETS_MARRIED : FED_BRACKETS_SINGLE;
+  // Subtract the standard deduction for the filing status (halved when the
+  // W-4 Step 2(c) multi-jobs checkbox is set — per IRS Pub 15-T).
+  const stdDed = STD_DEDUCTION_CENTS[inp.employee.filingStatus ?? 'single'] ?? STD_DEDUCTION_CENTS.single;
+  const effectiveStdDed = inp.employee.w4MultipleJobs ? Math.round(stdDed / 2) : stdDed;
+  const annualWages = federalTaxableWages * periods + (inp.employee.w4OtherIncomeCents ?? 0);
+  const annualTaxable = Math.max(
+    0,
+    annualWages - effectiveStdDed - (inp.employee.w4DeductionsCents ?? 0),
+  );
+  const brackets = inp.employee.filingStatus === 'married_jointly' ? FED_BRACKETS_MARRIED
+    : inp.employee.filingStatus === 'head_of_household' ? FED_BRACKETS_HOH
+    : FED_BRACKETS_SINGLE;
   const annualFed = Math.max(0, applyBrackets(annualTaxable, brackets) - (inp.employee.w4DependentsAmountCents ?? 0));
   const fedWithholding = Math.round(annualFed / periods) + (inp.employee.w4ExtraWithholdingCents ?? 0);
   if (fedWithholding > 0) lines.push({ category: 'employee_tax', label: 'Federal income tax', amountCents: -fedWithholding });
 
   // ---- FICA: Social Security + Medicare (employee side) ----
-  const ssWageBasePerPeriod = Math.round(SS_WAGE_BASE_CENTS / periods);
-  const ssWages = Math.min(taxableWages, ssWageBasePerPeriod);
+  // FICA wage base = gross minus Section 125 only (401(k) deferrals still
+  // get FICA-taxed). YTD caps prevent double-charging when an employee
+  // crosses a threshold mid-year.
+  const ytdSs = inp.ytdSsWagesCents ?? 0;
+  const ssRemaining = Math.max(0, SS_WAGE_BASE_CENTS - ytdSs);
+  const ssWages = Math.min(ficaTaxableWages, ssRemaining);
   const employeeSS = pctOfCents(ssWages, SS_RATE_PCT);
-  const employeeMedicare = pctOfCents(taxableWages, MEDICARE_RATE_PCT);
-  const employeeAddlMedicare = taxableWages * periods > MEDICARE_ADDL_THRESHOLD_CENTS
-    ? pctOfCents(taxableWages, MEDICARE_ADDL_RATE_PCT)
+  const employeeMedicare = pctOfCents(ficaTaxableWages, MEDICARE_RATE_PCT);
+  const ytdMedicare = inp.ytdMedicareWagesCents ?? 0;
+  const newMedicareYtd = ytdMedicare + ficaTaxableWages;
+  const addlMedicareWages = newMedicareYtd > MEDICARE_ADDL_THRESHOLD_CENTS
+    ? Math.min(ficaTaxableWages, newMedicareYtd - MEDICARE_ADDL_THRESHOLD_CENTS)
+    : 0;
+  const employeeAddlMedicare = addlMedicareWages > 0
+    ? pctOfCents(addlMedicareWages, MEDICARE_ADDL_RATE_PCT)
     : 0;
   if (employeeSS) lines.push({ category: 'employee_tax', label: 'Social Security', amountCents: -employeeSS });
   if (employeeMedicare) lines.push({ category: 'employee_tax', label: 'Medicare', amountCents: -employeeMedicare });
   if (employeeAddlMedicare) lines.push({ category: 'employee_tax', label: 'Add’l Medicare', amountCents: -employeeAddlMedicare });
 
-  // ---- State / local tax (rule-driven, stubbed) ----
+  // ---- State / local tax (rule-driven; flat + brackets) ----
+  // State withholding bases on the federal taxable wage base, since most
+  // states piggy-back on federal AGI conventions (CA, NY, etc.).
+  //
+  // Reciprocity: when an employee lives in one state and works in another,
+  // apply the resolved state (home if reciprocity exists, work otherwise).
+  // Locals (NYC, Philly) follow the work state irrespective of reciprocity
+  // because municipal taxes are jurisdictional, not residency-based.
+  const withholdingState = resolveWithholdingState(inp.employee.homeStateCode, inp.employee.workStateCode);
   let stateLocalEmployeeTax = 0;
   for (const j of inp.jurisdictions.filter(x => x.isActive && (x.level === 'state' || x.level === 'local'))) {
+    if (j.level === 'state') {
+      // No resolved state means no state tax applies. This guards against
+      // accidentally applying every active state jurisdiction to an employee
+      // whose home + work states are both blank.
+      if (!withholdingState) continue;
+      if (j.code !== `US-${withholdingState}`) continue;
+    }
+    if (j.level === 'local') {
+      // Locals require a work state (municipal taxes are jurisdictional,
+      // not residency-based). Without one we skip locals entirely so
+      // an unspecified-location employee doesn't pick up NYC/Philly tax.
+      if (!inp.employee.workStateCode) continue;
+      const parent = (j.rule as any)?.parentState;
+      if (parent && parent !== inp.employee.workStateCode) continue;
+    }
     const rule = j.rule || {};
     if (rule.kind === 'flat_percent' && typeof rule.employeePct === 'number') {
-      const t = pctOfCents(taxableWages, rule.employeePct);
+      const t = pctOfCents(federalTaxableWages, rule.employeePct);
       if (t > 0) {
         stateLocalEmployeeTax += t;
         lines.push({ category: 'employee_tax', label: `${j.name} (${j.code})`, amountCents: -t });
       }
+    } else if (rule.kind === 'brackets' && Array.isArray(rule.brackets)) {
+      // Bracket-based: rule.brackets is [{upToCents, ratePct, baseCents}, ...]
+      // annualized; rule.stdDeductionCents optionally subtracted first.
+      const annual = federalTaxableWages * periods - (rule.stdDeductionCents ?? 0);
+      const annualState = applyBrackets(Math.max(0, annual), rule.brackets as Bracket[]);
+      const periodState = Math.round(annualState / periods);
+      if (periodState > 0) {
+        stateLocalEmployeeTax += periodState;
+        lines.push({ category: 'employee_tax', label: `${j.name} (${j.code})`, amountCents: -periodState });
+      }
     }
-    // TODO: implement bracket-based state withholding (CA DE-4, NY IT-2104, etc.)
-    // TODO: implement local taxes (NYC, Philadelphia BIRT, school district taxes)
   }
 
   const employeeTaxCents = fedWithholding + employeeSS + employeeMedicare + employeeAddlMedicare + stateLocalEmployeeTax;
 
   // ---- Employer-side taxes (do not reduce net pay; tracked for liability/GL) ----
   const employerSS = pctOfCents(ssWages, SS_RATE_PCT);
-  const employerMedicare = pctOfCents(taxableWages, MEDICARE_RATE_PCT);
-  // FUTA: 6% on first $7,000 wages, but most employers get 5.4% credit → 0.6%.
-  const futa = pctOfCents(Math.min(taxableWages, Math.round(700000 / periods)), 0.6);
+  const employerMedicare = pctOfCents(ficaTaxableWages, MEDICARE_RATE_PCT);
+  // FUTA: 6% on first $7,000 wages per employee per year (less 5.4% state
+  // credit = 0.6%). Wage base same as FICA — Section 125 exempt, 401(k) not.
+  const ytdFuta = inp.ytdFutaWagesCents ?? 0;
+  const futaRemaining = Math.max(0, 700000 - ytdFuta);
+  const futa = pctOfCents(Math.min(ficaTaxableWages, futaRemaining), 0.6);
+  // SUTA per state: rule.kind='suta', rule.ratePct, rule.wageBaseCents.
+  // Employer-only and ONLY for the employee's work state — otherwise a
+  // single worker would be charged every seeded state's unemployment
+  // (e.g., both CA and NY SUTA at once).
+  let suta = 0;
+  if (inp.employee.workStateCode) {
+    const expectedSutaCode = `SUTA-${inp.employee.workStateCode}`;
+    for (const j of inp.jurisdictions.filter(x => x.isActive && x.level === 'state' && x.code === expectedSutaCode)) {
+      const rule = j.rule || {};
+      if (rule.kind === 'suta' && typeof rule.ratePct === 'number' && typeof rule.wageBaseCents === 'number') {
+        const remaining = Math.max(0, rule.wageBaseCents - ytdFuta); // approximate: re-uses FUTA YTD
+        const sutaWages = Math.min(ficaTaxableWages, remaining);
+        const t = pctOfCents(sutaWages, rule.ratePct);
+        if (t > 0) {
+          suta += t;
+          lines.push({ category: 'employer_tax', label: `${j.name} SUTA`, amountCents: t });
+        }
+      }
+    }
+  }
   // TODO: state unemployment (SUTA) by jurisdiction.
   let employerStateLocal = 0;
   for (const j of inp.jurisdictions.filter(x => x.isActive)) {
     const rule = j.rule || {};
     if (rule.kind === 'flat_percent' && typeof rule.employerPct === 'number') {
-      employerStateLocal += pctOfCents(taxableWages, rule.employerPct);
+      employerStateLocal += pctOfCents(ficaTaxableWages, rule.employerPct);
     }
   }
-  const employerTaxCents = employerSS + employerMedicare + futa + employerStateLocal;
+  const employerTaxCents = employerSS + employerMedicare + futa + suta + employerStateLocal;
   if (employerSS) lines.push({ category: 'employer_tax', label: 'Employer SS', amountCents: employerSS });
   if (employerMedicare) lines.push({ category: 'employer_tax', label: 'Employer Medicare', amountCents: employerMedicare });
   if (futa) lines.push({ category: 'employer_tax', label: 'FUTA', amountCents: futa });
@@ -247,13 +370,24 @@ export function computePayroll(inp: PayrollEngineInputs): PayrollEngineResult {
     }
   }
 
-  const netPayCents = Math.max(0, grossCents - preTaxCents - employeeTaxCents - postTaxCents);
+  // Wages portion of net pay — what's actually taxable / on the W-2.
+  const wagesNetCents = Math.max(0, grossCents - preTaxCents - employeeTaxCents - postTaxCents);
+  // Accountable-plan reimbursements ride along to deposit but are not wages
+  // and never reduce the gross calc. Surface them as a distinct line so the
+  // paystub and audit log can split the bank-credit amount from the W-2
+  // taxable wages.
+  const reimbursementCents = inp.reimbursementCents ?? 0;
+  if (reimbursementCents > 0) {
+    lines.push({ category: 'reimbursement', label: 'Expense reimbursement (non-taxable)', amountCents: reimbursementCents });
+  }
+  const netPayCents = wagesNetCents + reimbursementCents;
   lines.push({ category: 'net_pay', label: 'Net pay', amountCents: netPayCents });
 
   return {
     grossCents,
     preTaxDeductionCents: preTaxCents,
-    taxableWagesCents: taxableWages,
+    taxableWagesCents: federalTaxableWages,
+    ficaTaxableWagesCents: ficaTaxableWages,
     employeeTaxCents,
     employerTaxCents,
     postTaxDeductionCents: postTaxCents,

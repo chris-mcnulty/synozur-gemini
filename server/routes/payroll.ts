@@ -17,8 +17,11 @@ import {
   insertPayrollEmployeeSchema, insertPayrollCompensationSchema,
   insertPayrollPayScheduleSchema, insertPayrollDeductionSchema,
   insertPayrollRunSchema, insertPayrollTaxJurisdictionSchema,
-  insertPayrollGlAccountSchema,
+  insertPayrollGlAccountSchema, insertPayrollAchOriginatorSchema,
 } from "@shared/schema";
+import { buildNachaFile, type NachaEntry } from "../services/nacha";
+import { encryptString, decryptString, maskLast4 } from "../services/crypto";
+import { render941Html, renderW2Csv, renderW3Csv, render1099NecCsv } from "../services/tax-forms";
 
 interface PayrollRouteDeps {
   requireAuth: any;
@@ -54,7 +57,16 @@ export function registerPayrollRoutes(app: Express, deps: PayrollRouteDeps) {
     try {
       const includeTerminated = req.query.includeTerminated === 'true';
       const list = await payrollStorage.listEmployees(tenantOf(req), includeTerminated);
-      res.json(list);
+      const enriched = await payrollStorage.enrichWithUsers(list);
+      res.json(enriched);
+    } catch (e: any) { res.status(500).json({ message: e.message }); }
+  });
+
+  // Candidate internal users (active, with email) that aren't yet linked to a
+  // payroll employee — used to populate the "Add person" picker.
+  app.get('/api/payroll/eligible-users', requireAuth, PM, async (req, res) => {
+    try {
+      res.json(await payrollStorage.listEligibleUsers(tenantOf(req)));
     } catch (e: any) { res.status(500).json({ message: e.message }); }
   });
 
@@ -63,10 +75,20 @@ export function registerPayrollRoutes(app: Express, deps: PayrollRouteDeps) {
       const tenantId = tenantOf(req);
       const emp = await payrollStorage.getEmployee(tenantId, req.params.id);
       if (!emp) return res.status(404).json({ message: 'Not found' });
+      const [enriched] = await payrollStorage.enrichWithUsers([emp]);
       const compensation = await payrollStorage.listCompensation(tenantId, emp.id);
       const deductions = await payrollStorage.listDeductions(tenantId, emp.id);
       const pto = await payrollStorage.listPto(tenantId, emp.id);
-      res.json({ employee: emp, compensation, deductions, pto });
+      // Never echo the ciphertext or plain account number to the client;
+      // send a masked display string and a boolean indicating whether one
+      // is on file so the form knows whether to render "Replace" vs "Set".
+      const safeEmployee = {
+        ...enriched,
+        bankAccountNumberEnc: undefined,
+        bankAccountMasked: maskLast4(enriched.bankAccountNumberEnc),
+        hasBankAccount: !!enriched.bankAccountNumberEnc,
+      };
+      res.json({ employee: safeEmployee, compensation, deductions, pto });
     } catch (e: any) { res.status(500).json({ message: e.message }); }
   });
 
@@ -74,11 +96,36 @@ export function registerPayrollRoutes(app: Express, deps: PayrollRouteDeps) {
     try {
       const tenantId = tenantOf(req);
       const body = insertPayrollEmployeeSchema.parse({ ...req.body, tenantId });
+      // If linked to an internal user, prevent duplicate active payroll rows
+      // for the same person.
+      if (body.userId) {
+        const existing = await payrollStorage.findEmployeeByUserId(tenantId, body.userId);
+        if (existing) {
+          return res.status(409).json({
+            message: 'This user is already enrolled in payroll',
+            payrollEmployeeId: existing.id,
+          });
+        }
+      }
+      // Encrypt bank account number at the API boundary so plain text never
+      // touches storage. The column is named *Enc so the field stays valid
+      // when encryption is enabled.
+      if (body.bankAccountNumberEnc) {
+        body.bankAccountNumberEnc = encryptString(body.bankAccountNumberEnc) as any;
+      }
       const emp = await payrollStorage.createEmployee(body);
+      // Keep the global users.payroll_employee_type flag aligned, but only
+      // when this is the user's sole active payroll record across tenants
+      // (the helper itself enforces that gate). Passing currentTenantId
+      // excludes the row we just created from the "is another tenant
+      // already enrolled?" check.
+      if (emp.userId) {
+        await payrollStorage.syncUserEnrollmentFlag(emp.userId, emp.employeeType, tenantId);
+      }
       await payrollStorage.appendAudit({
         tenantId, actorUserId: (req.user as any)?.id,
         action: 'employee.create', entityType: 'employee', entityId: emp.id,
-        details: { email: emp.email }, ipAddress: req.ip,
+        details: { email: emp.email, userId: emp.userId }, ipAddress: req.ip,
       });
       res.json(emp);
     } catch (e: any) { res.status(400).json({ message: e.message }); }
@@ -89,6 +136,9 @@ export function registerPayrollRoutes(app: Express, deps: PayrollRouteDeps) {
       const tenantId = tenantOf(req);
       const body = insertPayrollEmployeeSchema.partial().parse({ ...req.body, tenantId });
       const { tenantId: _t, ...updates } = body;
+      if ('bankAccountNumberEnc' in updates && updates.bankAccountNumberEnc) {
+        updates.bankAccountNumberEnc = encryptString(updates.bankAccountNumberEnc) as any;
+      }
       const emp = await payrollStorage.updateEmployee(tenantId, req.params.id, updates);
       await payrollStorage.appendAudit({
         tenantId, actorUserId: (req.user as any)?.id,
@@ -214,7 +264,8 @@ export function registerPayrollRoutes(app: Express, deps: PayrollRouteDeps) {
       const run = await payrollStorage.getRun(tenantId, req.params.id);
       if (!run) return res.status(404).json({ message: 'Not found' });
       const items = await payrollStorage.listRunItems(tenantId, run.id);
-      res.json({ run, items });
+      const reimbursements = await payrollStorage.listReimbursementsForRun(tenantId, run.id);
+      res.json({ run, items, reimbursements });
     } catch (e: any) { res.status(500).json({ message: e.message }); }
   });
 
@@ -287,6 +338,22 @@ export function registerPayrollRoutes(app: Express, deps: PayrollRouteDeps) {
     } catch (e: any) { res.status(400).json({ message: e.message }); }
   });
 
+  // Create a reversal run that unwinds a finalized run. Result is a fresh
+  // 'draft' run with negative items; admin still has to approve and finalize.
+  app.post('/api/payroll/runs/:id/reverse', requireAuth, PM, async (req, res) => {
+    try {
+      const tenantId = tenantOf(req);
+      const userId = (req.user as any)?.id;
+      const reversal = await payrollStorage.createReversalRun(tenantId, req.params.id, userId);
+      await payrollStorage.appendAudit({
+        tenantId, actorUserId: userId, action: 'run.reverse',
+        entityType: 'run', entityId: reversal.id,
+        details: { reversesRunId: req.params.id }, ipAddress: req.ip,
+      });
+      res.json(reversal);
+    } catch (e: any) { res.status(400).json({ message: e.message }); }
+  });
+
   app.post('/api/payroll/runs/:id/void', requireAuth, PM, async (req, res) => {
     try {
       const tenantId = tenantOf(req);
@@ -347,6 +414,213 @@ export function registerPayrollRoutes(app: Express, deps: PayrollRouteDeps) {
         return res.send([header, ...lines].join('\n'));
       }
       res.json(rows);
+    } catch (e: any) { res.status(500).json({ message: e.message }); }
+  });
+
+  // ---- ACH / NACHA disbursement ----
+  app.get('/api/payroll/ach-originator', requireAuth, PM, async (req, res) => {
+    try { res.json(await payrollStorage.getAchOriginator(tenantOf(req)) || null); }
+    catch (e: any) { res.status(500).json({ message: e.message }); }
+  });
+
+  app.put('/api/payroll/ach-originator', requireAuth, PM, async (req, res) => {
+    try {
+      const tenantId = tenantOf(req);
+      const body = insertPayrollAchOriginatorSchema.parse({ ...req.body, tenantId });
+      const row = await payrollStorage.upsertAchOriginator(body);
+      await payrollStorage.appendAudit({
+        tenantId, actorUserId: (req.user as any)?.id,
+        action: 'ach_originator.upsert', entityType: 'ach_originator', entityId: row.id,
+        ipAddress: req.ip,
+      });
+      res.json(row);
+    } catch (e: any) { res.status(400).json({ message: e.message }); }
+  });
+
+  app.get('/api/payroll/runs/:id/ach-export', requireAuth, PM, async (req, res) => {
+    try {
+      const tenantId = tenantOf(req);
+      const run = await payrollStorage.getRun(tenantId, req.params.id);
+      if (!run) return res.status(404).json({ message: 'Run not found' });
+      if (run.status !== 'approved' && run.status !== 'finalized') {
+        return res.status(400).json({ message: `Cannot export ACH for ${run.status} run; approve or finalize first` });
+      }
+      const originator = await payrollStorage.getAchOriginator(tenantId);
+      if (!originator) {
+        return res.status(400).json({ message: 'ACH originator profile not configured. Set company id, ODFI, and immediate origin/destination first.' });
+      }
+      const items = await payrollStorage.listRunItems(tenantId, run.id);
+      const employees = await payrollStorage.listEmployees(tenantId, true);
+      const byId = new Map(employees.map(e => [e.id, e]));
+      const entries: NachaEntry[] = [];
+      const skipped: Array<{ employeeId: string; reason: string }> = [];
+      for (const it of items) {
+        if (it.netPayCents <= 0) continue;
+        const emp = byId.get(it.employeeId);
+        if (!emp) { skipped.push({ employeeId: it.employeeId, reason: 'employee_not_found' }); continue; }
+        if (!emp.bankRoutingNumber || !emp.bankAccountNumberEnc || !emp.bankAccountType) {
+          skipped.push({ employeeId: it.employeeId, reason: 'missing_bank_info' });
+          continue;
+        }
+        // Decrypt at the very last moment, only when actually emitting the
+        // NACHA file. The decrypted value never escapes this scope.
+        let accountNumber: string | null;
+        try { accountNumber = decryptString(emp.bankAccountNumberEnc); }
+        catch { skipped.push({ employeeId: it.employeeId, reason: 'decrypt_failed' }); continue; }
+        if (!accountNumber) { skipped.push({ employeeId: it.employeeId, reason: 'missing_bank_info' }); continue; }
+        entries.push({
+          employeeName: `${emp.firstName} ${emp.lastName}`.toUpperCase(),
+          employeeId: emp.externalEmployeeNumber || emp.id.slice(0, 15),
+          routingNumber: emp.bankRoutingNumber,
+          accountNumber,
+          accountType: emp.bankAccountType === 'savings' ? 'savings' : 'checking',
+          amountCents: it.netPayCents,
+        });
+      }
+      if (entries.length === 0) {
+        return res.status(400).json({ message: 'No employees with bank info on this run', skipped });
+      }
+      const effectiveDate = run.payDate.replace(/-/g, '').slice(2); // YYMMDD
+      const file = buildNachaFile({
+        companyName: originator.companyName,
+        companyId: originator.companyId,
+        originatingDfi: originator.originatingDfi,
+        immediateOriginName: originator.immediateOriginName,
+        immediateOrigin: originator.immediateOrigin,
+        immediateDestinationName: originator.immediateDestinationName,
+        immediateDestination: originator.immediateDestination,
+      }, entries, effectiveDate);
+      await payrollStorage.appendAudit({
+        tenantId, actorUserId: (req.user as any)?.id,
+        action: 'run.ach_export', entityType: 'run', entityId: run.id,
+        details: { entryCount: file.entryCount, totalCents: file.totalCents, skipped },
+        ipAddress: req.ip,
+      });
+      res.setHeader('Content-Type', 'text/plain');
+      res.setHeader('Content-Disposition', `attachment; filename="payroll-ach-${run.id}.ach"`);
+      res.setHeader('X-Ach-Entry-Count', String(file.entryCount));
+      res.setHeader('X-Ach-Total-Cents', String(file.totalCents));
+      res.send(file.content);
+    } catch (e: any) { res.status(500).json({ message: e.message }); }
+  });
+
+  // ---- Tax-filing totals (drives 941 quarterly + W-2 / 1099 annual prep) ----
+  app.get('/api/payroll/tax-totals', requireAuth, PM, async (req, res) => {
+    try {
+      const tenantId = tenantOf(req);
+      const q = z.object({
+        period: z.enum(['quarter', 'year', 'custom']).default('quarter'),
+        year: z.coerce.number().int().optional(),
+        quarter: z.coerce.number().int().min(1).max(4).optional(),
+        startDate: z.string().optional(),
+        endDate: z.string().optional(),
+      }).parse(req.query);
+      let startDate: string, endDate: string;
+      if (q.period === 'custom') {
+        if (!q.startDate || !q.endDate) return res.status(400).json({ message: 'startDate and endDate required for custom period' });
+        startDate = q.startDate; endDate = q.endDate;
+      } else if (q.period === 'year') {
+        const y = q.year ?? new Date().getUTCFullYear();
+        startDate = `${y}-01-01`; endDate = `${y}-12-31`;
+      } else {
+        const y = q.year ?? new Date().getUTCFullYear();
+        const qn = q.quarter ?? Math.floor(new Date().getUTCMonth() / 3) + 1;
+        const startMonth = (qn - 1) * 3 + 1;
+        const endMonth = startMonth + 2;
+        const lastDay = new Date(Date.UTC(y, endMonth, 0)).getUTCDate();
+        startDate = `${y}-${String(startMonth).padStart(2, '0')}-01`;
+        endDate = `${y}-${String(endMonth).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`;
+      }
+      res.json(await payrollStorage.taxTotals(tenantId, startDate, endDate));
+    } catch (e: any) { res.status(400).json({ message: e.message }); }
+  });
+
+  // ---- Tax filing artifacts: 941, W-2, W-3, 1099-NEC ----
+  // Each returns a printable HTML (941) or CSV (W-2/W-3/1099) suitable to
+  // hand to an accountant or paste into filing software.
+  app.get('/api/payroll/tax-forms/941', requireAuth, PM, async (req, res) => {
+    try {
+      const tenantId = tenantOf(req);
+      const q = z.object({ year: z.coerce.number().int(), quarter: z.coerce.number().int().min(1).max(4) }).parse(req.query);
+      const startMonth = (q.quarter - 1) * 3 + 1;
+      const endMonth = startMonth + 2;
+      const lastDay = new Date(Date.UTC(q.year, endMonth, 0)).getUTCDate();
+      const startDate = `${q.year}-${String(startMonth).padStart(2, '0')}-01`;
+      const endDate = `${q.year}-${String(endMonth).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`;
+      const totals = await payrollStorage.taxTotals(tenantId, startDate, endDate);
+      const scheduleB = await payrollStorage.scheduleBLiabilities(tenantId, startDate, endDate);
+      const html = render941Html({
+        tenantName: (req.user as any)?.tenantName ?? 'Employer',
+        ein: (req.query.ein as string) || undefined,
+        year: q.year, quarter: q.quarter,
+        totals: totals.totals,
+        w2EmployeeCount: totals.w2Employees.length,
+        scheduleB,
+      });
+      res.setHeader('Content-Type', 'text/html; charset=utf-8');
+      res.send(html);
+    } catch (e: any) { res.status(400).json({ message: e.message }); }
+  });
+
+  app.get('/api/payroll/tax-forms/w2', requireAuth, PM, async (req, res) => {
+    try {
+      const tenantId = tenantOf(req);
+      const year = Number(req.query.year ?? new Date().getUTCFullYear());
+      const totals = await payrollStorage.taxTotals(tenantId, `${year}-01-01`, `${year}-12-31`);
+      res.setHeader('Content-Type', 'text/csv');
+      res.setHeader('Content-Disposition', `attachment; filename="w2-${year}.csv"`);
+      res.send(renderW2Csv(totals as any));
+    } catch (e: any) { res.status(400).json({ message: e.message }); }
+  });
+
+  app.get('/api/payroll/tax-forms/w3', requireAuth, PM, async (req, res) => {
+    try {
+      const tenantId = tenantOf(req);
+      const year = Number(req.query.year ?? new Date().getUTCFullYear());
+      const totals = await payrollStorage.taxTotals(tenantId, `${year}-01-01`, `${year}-12-31`);
+      res.setHeader('Content-Type', 'text/csv');
+      res.setHeader('Content-Disposition', `attachment; filename="w3-${year}.csv"`);
+      res.send(renderW3Csv(totals as any));
+    } catch (e: any) { res.status(400).json({ message: e.message }); }
+  });
+
+  app.get('/api/payroll/tax-forms/1099-nec', requireAuth, PM, async (req, res) => {
+    try {
+      const tenantId = tenantOf(req);
+      const year = Number(req.query.year ?? new Date().getUTCFullYear());
+      const totals = await payrollStorage.taxTotals(tenantId, `${year}-01-01`, `${year}-12-31`);
+      res.setHeader('Content-Type', 'text/csv');
+      res.setHeader('Content-Disposition', `attachment; filename="1099-nec-${year}.csv"`);
+      res.send(render1099NecCsv(totals as any));
+    } catch (e: any) { res.status(400).json({ message: e.message }); }
+  });
+
+  // ---- Self-service: an employee can see their own finalized paystubs ----
+  // No PAYROLL_MANAGER gate — any authenticated user with a linked payroll
+  // record can see their own pay history. Tenant is derived from the session
+  // and the only employees returned are those where payrollEmployees.userId
+  // matches the requester. There is no path to view another person's data.
+  app.get('/api/me/payroll/paystubs', requireAuth, async (req, res) => {
+    try {
+      const tenantId = tenantOf(req);
+      const userId = (req.user as any).id;
+      const emp = await payrollStorage.findEmployeeByUserId(tenantId, userId);
+      if (!emp) return res.json({ employee: null, paystubs: [] });
+      const paystubs = await payrollStorage.listPaystubsForEmployee(tenantId, emp.id);
+      res.json({ employee: { id: emp.id, employeeType: emp.employeeType, status: emp.status }, paystubs });
+    } catch (e: any) { res.status(500).json({ message: e.message }); }
+  });
+
+  app.get('/api/me/payroll/paystubs/:runId', requireAuth, async (req, res) => {
+    try {
+      const tenantId = tenantOf(req);
+      const userId = (req.user as any).id;
+      const emp = await payrollStorage.findEmployeeByUserId(tenantId, userId);
+      if (!emp) return res.status(404).json({ message: 'You are not enrolled in payroll' });
+      const detail = await payrollStorage.getPaystubForEmployee(tenantId, emp.id, req.params.runId);
+      if (!detail) return res.status(404).json({ message: 'Paystub not found' });
+      const reimbursements = await payrollStorage.listReimbursementsForRunItem(tenantId, detail.item.id);
+      res.json({ ...detail, reimbursements });
     } catch (e: any) { res.status(500).json({ message: e.message }); }
   });
 

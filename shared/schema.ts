@@ -275,6 +275,10 @@ export const users = pgTable("users", {
   weeklyDigestEnabled: boolean("weekly_digest_enabled").notNull().default(true),
   weeklyDigestDay: integer("weekly_digest_day").notNull().default(1), // 1=Monday … 7=Sunday
   weeklyDigestTime: varchar("weekly_digest_time", { length: 5 }).notNull().default("08:00"), // HH:MM
+  // Payroll enrollment: when non-null, an internal user is enrolled in payroll
+  // and a linked payroll_employees row is provisioned automatically. Clearing
+  // the value marks the linked employee 'terminated' (no cascade delete).
+  payrollEmployeeType: varchar("payroll_employee_type", { length: 16 }), // 'w2' | '1099' | null
   createdAt: timestamp("created_at").notNull().default(sql`now()`),
 });
 
@@ -1223,6 +1227,15 @@ export const expenses = pgTable("expenses", {
   rejectionNote: text("rejection_note"),
   reimbursedAt: timestamp("reimbursed_at"),
   reimbursementBatchId: varchar("reimbursement_batch_id"), // Will reference reimbursementBatches
+  // Payroll integration: when the reimbursement was paid via a payroll run
+  // (Gemini), this points at the run item it rode in on. Mutually exclusive
+  // with reimbursementBatchId in normal operation. ON DELETE SET NULL so a
+  // reversed run releasing its items doesn't break the expense.
+  payrollRunItemId: varchar("payroll_run_item_id").references(
+    (): any => payrollRunItems.id,
+    { onDelete: 'set null' },
+  ),
+  payrollReimbursedAt: timestamp("payroll_reimbursed_at"),
   clientPaidAt: timestamp("client_paid_at"), // When client paid for this expense via invoice batch
   createdAt: timestamp("created_at").notNull().default(sql`now()`),
 }, (table) => ({
@@ -4385,6 +4398,20 @@ export const payrollEmployees = pgTable("payroll_employees", {
   w4DeductionsCents: integer("w4_deductions_cents").default(0),
   w4ExtraWithholdingCents: integer("w4_extra_withholding_cents").default(0),
   defaultPayScheduleId: varchar("default_pay_schedule_id"),
+  // Direct deposit (for ACH/NACHA export). Production deployments must store
+  // accountNumberEnc encrypted at rest — this column currently holds plain
+  // text for the stubbed implementation. Routing is the 9-digit ABA number.
+  bankRoutingNumber: varchar("bank_routing_number", { length: 9 }),
+  // AES-256-GCM ciphertext envelope formatted as
+  //   v1:<iv-b64(16)>:<tag-b64(24)>:<ciphertext-b64(...)>
+  // New writes go through `encryptString` in server/services/crypto.ts and
+  // fail closed when PAYROLL_ENCRYPTION_KEY is unset. Legacy rows that
+  // pre-date encryption may still be plain text and round-trip as-is until
+  // the next admin save, at which point they get encrypted. For a 17-digit
+  // account number the envelope is ~70 characters; 256 chars leaves room
+  // for longer account numbers and future version prefixes.
+  bankAccountNumberEnc: varchar("bank_account_number_enc", { length: 256 }),
+  bankAccountType: varchar("bank_account_type", { length: 16 }), // 'checking' | 'savings'
   // Soft delete for compliance
   deletedAt: timestamp("deleted_at"),
   createdAt: timestamp("created_at").notNull().default(sql`now()`),
@@ -4392,6 +4419,7 @@ export const payrollEmployees = pgTable("payroll_employees", {
 }, (t) => ({
   tenantIdx: index("idx_payroll_emp_tenant").on(t.tenantId),
   emailIdx: index("idx_payroll_emp_email").on(t.tenantId, t.email),
+  userIdx: index("idx_payroll_emp_user").on(t.userId),
 }));
 
 export const insertPayrollEmployeeSchema = createInsertSchema(payrollEmployees).omit({
@@ -4421,6 +4449,26 @@ export const payrollCompensation = pgTable("payroll_compensation", {
 export const insertPayrollCompensationSchema = createInsertSchema(payrollCompensation).omit({ id: true, createdAt: true });
 export type InsertPayrollCompensation = z.infer<typeof insertPayrollCompensationSchema>;
 export type PayrollCompensation = typeof payrollCompensation.$inferSelect;
+
+// Per-tenant company info used to populate NACHA / ACH disbursement files.
+// One row per tenant; created lazily when an admin first sets up direct deposit.
+export const payrollAchOriginator = pgTable("payroll_ach_originator", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  tenantId: varchar("tenant_id").notNull().references(() => tenants.id, { onDelete: 'cascade' }).unique(),
+  companyName: varchar("company_name", { length: 16 }).notNull(), // NACHA field is 16 chars
+  companyId: varchar("company_id", { length: 10 }).notNull(), // EIN with leading 1, or DUNS
+  originatingDfi: varchar("originating_dfi", { length: 8 }).notNull(), // 8-digit routing prefix
+  immediateOriginName: varchar("immediate_origin_name", { length: 23 }).notNull(),
+  immediateOrigin: varchar("immediate_origin", { length: 10 }).notNull(),
+  immediateDestinationName: varchar("immediate_destination_name", { length: 23 }).notNull(),
+  immediateDestination: varchar("immediate_destination", { length: 10 }).notNull(),
+  createdAt: timestamp("created_at").notNull().default(sql`now()`),
+  updatedAt: timestamp("updated_at").notNull().default(sql`now()`),
+});
+
+export const insertPayrollAchOriginatorSchema = createInsertSchema(payrollAchOriginator).omit({ id: true, createdAt: true, updatedAt: true });
+export type InsertPayrollAchOriginator = z.infer<typeof insertPayrollAchOriginatorSchema>;
+export type PayrollAchOriginator = typeof payrollAchOriginator.$inferSelect;
 
 // Pay schedules — define cadence, period boundaries, and pay date offset.
 export const payrollPaySchedules = pgTable("payroll_pay_schedules", {
@@ -4455,6 +4503,13 @@ export const payrollDeductions = pgTable("payroll_deductions", {
   employerMatchCents: integer("employer_match_cents"),
   employerMatchPercent: decimal("employer_match_percent", { precision: 6, scale: 4 }),
   glAccountId: varchar("gl_account_id"),
+  // Tax scope of the pre-tax deduction (only used when deductionType='pre_tax'):
+  //   'all'           = Section 125 cafeteria (health/HSA/FSA) - exempt from
+  //                     federal income tax AND FICA AND FUTA
+  //   'federal_only'  = 401(k) traditional - exempt from federal income tax
+  //                     only; FICA + FUTA still apply
+  // Pre-existing rows are backfilled to 'all' (the engine's prior behaviour).
+  preTaxScope: varchar("pre_tax_scope", { length: 20 }).default('federal_only'),
   effectiveFrom: date("effective_from").notNull(),
   effectiveTo: date("effective_to"),
   isActive: boolean("is_active").notNull().default(true),
@@ -4513,6 +4568,11 @@ export const payrollRuns = pgTable("payroll_runs", {
   periodStart: date("period_start").notNull(),
   periodEnd: date("period_end").notNull(),
   payDate: date("pay_date").notNull(),
+  // 'regular' (default), 'bonus' (off-cycle), or 'reversal' (unwinds a prior
+  // finalized run; amounts on items are negative). Reversal runs link to the
+  // run they undo via `reverses_run_id` so the YTD calc can pick them up.
+  runType: varchar("run_type", { length: 16 }).notNull().default('regular'),
+  reversesRunId: varchar("reverses_run_id"),
   status: varchar("status", { length: 20 }).notNull().default('draft'),
   // Totals (cached for reporting; recomputed from items on preview).
   totalGrossCents: integer("total_gross_cents").notNull().default(0),
@@ -4560,6 +4620,15 @@ export const payrollRunItems = pgTable("payroll_run_items", {
   employerTaxCents: integer("employer_tax_cents").notNull().default(0),
   preTaxDeductionCents: integer("pre_tax_deduction_cents").notNull().default(0),
   postTaxDeductionCents: integer("post_tax_deduction_cents").notNull().default(0),
+  // Wages subject to FICA / FUTA this period (gross minus Section 125 only,
+  // because 401(k) traditional deferrals are still FICA-taxable). Persisted
+  // so YTD caps + Form 941 line 5c + W-2 Box 5 don't have to re-derive it
+  // from preTaxDeductionCents (which mixes both scopes).
+  ficaTaxableWagesCents: integer("fica_taxable_wages_cents").notNull().default(0),
+  // Constellation expense reimbursements rolled into this run item. Added
+  // to net pay AFTER tax math (accountable-plan, non-taxable). Not part of
+  // grossCents and never reported on the W-2 / 941 totals.
+  reimbursementCents: integer("reimbursement_cents").notNull().default(0),
   netPayCents: integer("net_pay_cents").notNull().default(0),
   // Detailed breakdown for audit (lines).
   breakdown: jsonb("breakdown").$type<Record<string, any>>(),
@@ -4573,6 +4642,32 @@ export const payrollRunItems = pgTable("payroll_run_items", {
 export const insertPayrollRunItemSchema = createInsertSchema(payrollRunItems).omit({ id: true, createdAt: true });
 export type InsertPayrollRunItem = z.infer<typeof insertPayrollRunItemSchema>;
 export type PayrollRunItem = typeof payrollRunItems.$inferSelect;
+
+// Per-expense itemization for reimbursements bundled into a payroll run item.
+// One row per Constellation expense rolled in. Lets the paystub itemize what
+// makes up the reimbursement total and supports auditor reconciliation back
+// to specific receipts.
+export const payrollReimbursementLines = pgTable("payroll_reimbursement_lines", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  tenantId: varchar("tenant_id").notNull().references(() => tenants.id, { onDelete: 'cascade' }),
+  runItemId: varchar("run_item_id").notNull().references(() => payrollRunItems.id, { onDelete: 'cascade' }),
+  // Restrict on delete so an in-flight payroll reimbursement can't be
+  // orphaned by deleting the underlying expense — finalize is the only
+  // path that removes the link (by clearing payrollRunItemId on the
+  // expense, not by deleting the line itself).
+  expenseId: varchar("expense_id").notNull().references(() => expenses.id, { onDelete: 'restrict' }),
+  amountCents: integer("amount_cents").notNull(),
+  category: text("category").notNull(),
+  description: text("description"),
+  createdAt: timestamp("created_at").notNull().default(sql`now()`),
+}, (t) => ({
+  runItemIdx: index("idx_payroll_reim_lines_run_item").on(t.runItemId),
+  expenseIdx: index("idx_payroll_reim_lines_expense").on(t.expenseId),
+}));
+
+export const insertPayrollReimbursementLineSchema = createInsertSchema(payrollReimbursementLines).omit({ id: true, createdAt: true });
+export type InsertPayrollReimbursementLine = z.infer<typeof insertPayrollReimbursementLineSchema>;
+export type PayrollReimbursementLine = typeof payrollReimbursementLines.$inferSelect;
 
 // GL accounts & mappings — drive accounting export (CSV/JSON).
 export const payrollGlAccounts = pgTable("payroll_gl_accounts", {

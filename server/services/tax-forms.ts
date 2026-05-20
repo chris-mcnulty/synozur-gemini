@@ -1,0 +1,202 @@
+/**
+ * Tax filing artifact generators for Gemini Payroll.
+ *
+ * Produces HTML for printable forms (941 quarterly + Schedule B) and CSV
+ * for annual filings (W-2 box totals, W-3 transmittal summary, 1099-NEC).
+ * These are NOT IRS-filing-ready PDFs — they're accountant-input
+ * artifacts. Accountants paste totals into their filing software (Drake,
+ * Lacerte, CCH, ProSystem fx); SSA EFW2 / IRS FIRE generation is a
+ * separate downstream concern.
+ *
+ * All cent inputs are integer cents; dollar formatting happens here.
+ */
+
+const usd = (cents: number) => (cents / 100).toFixed(2);
+
+// Neutralize CSV cells against spreadsheet formula injection. Excel and
+// Google Sheets treat values starting with =, +, -, @, or a leading TAB/CR
+// as formulas. Prefixing with a single apostrophe (which the spreadsheet
+// strips on render) defangs them while keeping the visible text intact.
+const csvEsc = (v: any) => {
+  let s = v == null ? '' : String(v);
+  if (s.length > 0 && /^[=+\-@\t\r]/.test(s)) s = "'" + s;
+  return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+};
+
+// HTML-escape a value before interpolating it into the 941 template so
+// tenant-supplied data (name, EIN) can't inject markup or scripts into
+// the printable form opened in an admin's browser.
+const htmlEsc = (v: any) => {
+  const s = v == null ? '' : String(v);
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+};
+
+export interface TaxTotalsInput {
+  window: { startDate: string; endDate: string };
+  totals: {
+    fedIncomeTaxWithheldCents: number;
+    ssWagesCents: number;
+    medicareWagesCents: number;
+    employerSsCents: number;
+    employerMedicareCents: number;
+  };
+  w2Employees: Array<{
+    employeeId: string;
+    name: string;
+    email: string | null;
+    grossCents: number;
+    taxableWagesCents: number;
+    fedIncomeTaxCents: number;
+    ssWagesCents: number;
+    medicareWagesCents: number;
+    netPayCents: number;
+  }>;
+  form1099Recipients: Array<{
+    employeeId: string;
+    name: string;
+    email: string | null;
+    grossCents: number;
+  }>;
+}
+
+export interface ScheduleBDay {
+  date: string;
+  liabilityCents: number;
+}
+
+/**
+ * Render the 941 quarterly return as a printable HTML page. Layout
+ * follows the form's logical sections but doesn't try to match the IRS
+ * PDF pixel-for-pixel — accountants take the numbers, not the page.
+ */
+export function render941Html(opts: {
+  tenantName: string;
+  ein?: string;
+  quarter: number;
+  year: number;
+  totals: TaxTotalsInput['totals'];
+  w2EmployeeCount: number;
+  scheduleB?: ScheduleBDay[];
+}): string {
+  const { tenantName, ein, quarter, year, totals, w2EmployeeCount, scheduleB } = opts;
+  // Form 941 line items (simplified mapping):
+  //   2  Wages, tips, other comp     = ssWages (use Medicare wages for accuracy)
+  //   3  Federal income tax withheld = fedIncomeTaxWithheldCents
+  //   5a Taxable SS wages            * 12.4% (employee + employer combined)
+  //   5c Taxable Medicare wages      * 2.9%
+  //   6  Total taxes before adjust.  = 3 + 5a + 5c
+  //   10 Total taxes after adjust.   = line 6 (no adjustments modeled)
+  //   12 Total taxes after credits   = line 10
+  //   13 Total deposits              = same as line 12 (assume fully paid)
+  const ssTaxTotal = Math.round(totals.ssWagesCents * 0.124);
+  const medicareTaxTotal = Math.round(totals.medicareWagesCents * 0.029);
+  const totalTaxes = totals.fedIncomeTaxWithheldCents + ssTaxTotal + medicareTaxTotal;
+
+  const safeTenant = htmlEsc(tenantName);
+  const safeEin = ein ? htmlEsc(ein) : '';
+  return `<!doctype html>
+<html><head><meta charset="utf-8"><title>Form 941 ${year} Q${quarter} — ${safeTenant}</title>
+<style>
+  @page { size: letter; margin: 0.5in; }
+  body { font-family: 'Avenir Next LT Pro', Arial, sans-serif; font-size: 11pt; color: #111; }
+  h1 { font-size: 16pt; margin: 0 0 4px; }
+  .meta { color: #666; margin-bottom: 18px; font-size: 9.5pt; }
+  table.lines { border-collapse: collapse; width: 100%; margin-top: 12px; }
+  table.lines th, table.lines td { border: 1px solid #ccc; padding: 6px 8px; }
+  table.lines th { background: #f5f5f5; text-align: left; font-weight: 600; }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .totals { font-weight: 600; background: #fafafa; }
+  .stamp { color: #b91c1c; font-size: 9pt; margin-top: 18px; }
+  table.schb { border-collapse: collapse; width: 100%; margin-top: 18px; font-size: 9.5pt; }
+  table.schb th, table.schb td { border: 1px solid #ddd; padding: 4px 6px; }
+</style></head>
+<body>
+  <h1>Form 941 — Employer's Quarterly Federal Tax Return</h1>
+  <div class="meta">${safeTenant}${safeEin ? ` · EIN ${safeEin}` : ''} · ${year} Quarter ${quarter}</div>
+
+  <table class="lines">
+    <tr><th>Line</th><th>Description</th><th class="num">Amount</th></tr>
+    <tr><td>1</td><td>Number of employees</td><td class="num">${w2EmployeeCount}</td></tr>
+    <tr><td>2</td><td>Wages, tips, and other compensation</td><td class="num">$${usd(totals.medicareWagesCents)}</td></tr>
+    <tr><td>3</td><td>Federal income tax withheld</td><td class="num">$${usd(totals.fedIncomeTaxWithheldCents)}</td></tr>
+    <tr><td>5a</td><td>Taxable Social Security wages × 12.4%</td><td class="num">$${usd(ssTaxTotal)}</td></tr>
+    <tr><td>5c</td><td>Taxable Medicare wages × 2.9%</td><td class="num">$${usd(medicareTaxTotal)}</td></tr>
+    <tr class="totals"><td>6</td><td>Total taxes before adjustments</td><td class="num">$${usd(totalTaxes)}</td></tr>
+    <tr class="totals"><td>10</td><td>Total taxes after adjustments</td><td class="num">$${usd(totalTaxes)}</td></tr>
+    <tr class="totals"><td>12</td><td>Total taxes after credits</td><td class="num">$${usd(totalTaxes)}</td></tr>
+    <tr><td>13</td><td>Total deposits this quarter (assumed)</td><td class="num">$${usd(totalTaxes)}</td></tr>
+  </table>
+
+  ${scheduleB && scheduleB.length > 0 ? `
+  <h2 style="font-size:13pt;margin-top:24px">Schedule B — Daily Tax Liability</h2>
+  <table class="schb">
+    <tr><th>Pay date</th><th class="num">Liability</th></tr>
+    ${scheduleB.map(d => `<tr><td>${htmlEsc(d.date)}</td><td class="num">$${usd(d.liabilityCents)}</td></tr>`).join('')}
+    <tr class="totals"><td>Quarter total</td><td class="num">$${usd(scheduleB.reduce((s, d) => s + d.liabilityCents, 0))}</td></tr>
+  </table>
+  ` : ''}
+
+  <p class="stamp">DRAFT — totals derived from Gemini Payroll finalized runs. Verify against IRS publications and your bank deposit history before filing.</p>
+</body></html>`;
+}
+
+/** W-2 box totals as CSV. One row per W-2 employee for the calendar year. */
+export function renderW2Csv(input: TaxTotalsInput): string {
+  const header = [
+    'Employee ID', 'Name', 'Email',
+    'Box 1 - Wages',
+    'Box 2 - Fed Income Tax',
+    'Box 3 - SS Wages',
+    'Box 4 - SS Tax (6.2%)',
+    'Box 5 - Medicare Wages',
+    'Box 6 - Medicare Tax (1.45%)',
+  ].join(',');
+  const rows = input.w2Employees.map(e => [
+    e.employeeId, e.name, e.email ?? '',
+    usd(e.taxableWagesCents),
+    usd(e.fedIncomeTaxCents),
+    usd(e.ssWagesCents),
+    usd(Math.round(e.ssWagesCents * 0.062)),
+    usd(e.medicareWagesCents),
+    usd(Math.round(e.medicareWagesCents * 0.0145)),
+  ].map(csvEsc).join(','));
+  return [header, ...rows].join('\n');
+}
+
+/**
+ * W-3 transmittal summary (one row). The W-3 totals across all W-2s for
+ * the year; this is the data that goes on the cover sheet sent to SSA.
+ */
+export function renderW3Csv(input: TaxTotalsInput): string {
+  const totals = input.w2Employees.reduce((acc, e) => ({
+    box1: acc.box1 + e.taxableWagesCents,
+    box2: acc.box2 + e.fedIncomeTaxCents,
+    box3: acc.box3 + e.ssWagesCents,
+    box5: acc.box5 + e.medicareWagesCents,
+    count: acc.count + 1,
+  }), { box1: 0, box2: 0, box3: 0, box5: 0, count: 0 });
+  return [
+    'Field,Amount',
+    `Number of W-2s,${totals.count}`,
+    `Box 1 - Total Wages,${usd(totals.box1)}`,
+    `Box 2 - Total Fed Income Tax,${usd(totals.box2)}`,
+    `Box 3 - Total SS Wages,${usd(totals.box3)}`,
+    `Box 4 - Total SS Tax,${usd(Math.round(totals.box3 * 0.062))}`,
+    `Box 5 - Total Medicare Wages,${usd(totals.box5)}`,
+    `Box 6 - Total Medicare Tax,${usd(Math.round(totals.box5 * 0.0145))}`,
+  ].join('\n');
+}
+
+/** 1099-NEC box totals as CSV. One row per 1099 recipient for the year. */
+export function render1099NecCsv(input: TaxTotalsInput): string {
+  const header = ['Recipient ID', 'Name', 'Email', 'Box 1 - Nonemployee Compensation'].join(',');
+  const rows = input.form1099Recipients.map(r => [
+    r.employeeId, r.name, r.email ?? '', usd(r.grossCents),
+  ].map(csvEsc).join(','));
+  return [header, ...rows].join('\n');
+}

@@ -1,7 +1,51 @@
 # Constellation Product Backlog
 
-**Last Updated**: May 7, 2026
-**Version**: 7.1 — v2.5 release: Galaxy Client Portal API, Notifications System, Multi-Currency Estimates, Time Grid 2.0, Estimate Version History, Client Portal Approvals & Sign-offs, Payment Milestone Billing Automation, AI Project Manager Agent, Planner LWW. Notifications System (previously deprioritized) marked ✅ Complete. Copilot Write Phases 0–5 fully shipped.
+**Last Updated**: May 19, 2026
+**Version**: 7.2 — Adds Payroll integration sweep (users ↔ payroll_employees auto-provisioning, time-tracking hours feed, YTD/HoH tax correctness, NACHA disbursement export, employee self-service paystubs, quarterly tax totals, PTO accrual on finalize). Remaining payroll P1 work captured below.
+
+---
+
+## 🚧 In Progress — Payroll P1 Remediation (May 2026)
+
+The payroll module shipped with full schema, calc engine, and run workflow
+but several integration and correctness gaps blocked using it in production.
+The current sweep closes the highest-impact gaps; remaining items below.
+
+**Completed in this sweep:**
+- [x] Users ↔ Payroll auto-provisioning (`users.payrollEmployeeType`)
+- [x] Bi-directional UI surface (payroll badge on users page, linked-user pill on payroll page)
+- [x] Payroll runs pull hours from approved/submitted time entries (FLSA OT split per ISO week)
+- [x] True YTD accumulators for SS wage base, additional Medicare, FUTA cap
+- [x] Head-of-household federal bracket table
+- [x] NACHA / ACH PPD credit file export for approved/finalized runs
+- [x] Per-tenant ACH originator profile
+- [x] Bank routing/account/type capture on employee detail
+- [x] Full W-4 capture UI (filing status, multi-jobs, dependents, deductions, extra withholding)
+- [x] Tax totals endpoint (`/api/payroll/tax-totals?period=quarter|year|custom`)
+- [x] PTO accrual + decrement hooked into `finalizeRun`
+- [x] Employee self-service paystubs (`/me/paystubs` + `/me/paystubs/:runId`)
+- [x] AES-256-GCM encryption of bank account numbers (envelope, `PAYROLL_ENCRYPTION_KEY`, fail-closed)
+- [x] W-4 Step 2(c) multiple-jobs withholding adjustment (halve standard deduction per Pub 15-T)
+- [x] Bracket-based state withholding (CA, NY, NJ, PA) + NYC and Philadelphia local taxes
+- [x] SUTA per state (rule-driven, scoped to employee work state)
+- [x] Section 125 vs 401(k) traditional FICA treatment (`pre_tax_scope` on deductions; FICA wage base persisted per run item)
+- [x] Reversal runs (`POST /api/payroll/runs/:id/reverse`)
+- [x] Multi-state reciprocity (15 reciprocal pairs; engine resolves home vs work state for withholding)
+- [x] Garnishment split into its own GL category (`garnishment_liability`) in the GL export
+- [x] Form 941 + Schedule B printable HTML; W-2 / W-3 / 1099-NEC CSVs (artifact-only, not e-file)
+
+**Remaining P1 (in priority order):**
+- [ ] **State withholding matrix beyond CA/NY/NJ/PA** — bracket tables for the next ~10 states by headcount (TX has no state income tax; covers MA, IL, GA, NC, VA, OH, WA-PFML, CO, MN, MI). Existing engine `kind: 'brackets'` is ready; just need data.
+- [ ] **State-specific SUTA experience rates** — platform seeds the new-employer rate per state; tenants need a UI to override with the experience-rated percentage their state assigned.
+- [ ] **SSA EFW2 + IRS FIRE e-file** — current artifacts are CSV/HTML for accountant input. Generate the actual SSA EFW2 fixed-width W-2 file and the IRS FIRE 1099 file for direct e-filing.
+- [ ] **941 PDF via Puppeteer** — current 941 endpoint returns printable HTML. Add a `?format=pdf` variant rendered via the existing puppeteer pipeline (already used by invoicing).
+- [ ] **Off-cycle / bonus run UX** — schema and runType `'bonus'` are in place but the create-run flow doesn't let admins pick a subset of employees yet.
+- [ ] **Per-period accruals other than PTO** — sick leave, parental leave, jury duty caps.
+- [ ] **Title III garnishment priority ordering** — current model treats each garnishment independently; multiple garnishments should follow IRS / DOL ordering (federal tax → child support → student loans → consumer creditors → state tax).
+- [ ] **Payment cycle SLA monitoring** — alert when a scheduled run has not been previewed/approved within N days of pay date.
+- [ ] **Audit log retention + export** — currently append-only with no retention policy or exportable evidence package.
+- [ ] **Per diem accountable vs non-accountable split** — when per diem exceeds the federal rate, the spillover is taxable wages; current reimbursement path treats everything as accountable.
+- [ ] **HSA / health benefit reimbursements** — currently flow through the standard reimbursement path; they're actually pre-tax (Box 12 codes), not tax-free.
 
 ---
 

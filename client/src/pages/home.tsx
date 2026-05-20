@@ -8,7 +8,7 @@ import {
   Receipt,
   Brain,
   FileBarChart,
-  AlertTriangle,
+  Clock,
   Cloud,
   ArrowRight,
   ChevronRight,
@@ -16,7 +16,8 @@ import {
   Shield,
   Users,
   Zap,
-  Blocks,
+  Landmark,
+  Wallet,
 } from "lucide-react";
 import heroImage from "@assets/AdobeStock_244105520_1771187192557.jpeg";
 import secondaryImage from "@assets/AdobeStock_189127184_1771187213585.jpeg";
@@ -24,59 +25,59 @@ import secondaryImage from "@assets/AdobeStock_189127184_1771187213585.jpeg";
 const features = [
   {
     icon: Calculator,
-    title: "Project Estimates",
+    title: "Gross-to-Net Payroll Runs",
     description:
-      "Build detailed, multi-phase estimates with hierarchical rate precedence, Excel/CSV import/export, and AI-generated narratives. From T&M to retainer engagements, Constellation handles it all.",
+      "Draft, preview, approve, finalize. Per-employee breakdowns with federal withholding, FICA, employer taxes, and pre/post-tax deductions — all on integer-cent math with an append-only audit log.",
     highlight: true,
     color: "from-violet-500 to-purple-600",
     lightColor: "bg-violet-50 dark:bg-violet-950/40",
     iconColor: "text-violet-600 dark:text-violet-400",
   },
   {
-    icon: Receipt,
-    title: "Expense Management",
+    icon: Clock,
+    title: "Time-Tracking Hours Feed",
     description:
-      "Complete expense lifecycle with approval workflows, automated per diem calculations (CONUS & OCONUS), receipt management, and contractor reimbursement invoicing.",
+      "Hours flow automatically from your team's approved time entries into each payroll run, with FLSA-style overtime split by ISO week. Manual overrides still win when you need them.",
     highlight: false,
     color: "from-emerald-500 to-teal-600",
     lightColor: "bg-emerald-50 dark:bg-emerald-950/40",
     iconColor: "text-emerald-600 dark:text-emerald-400",
   },
   {
-    icon: Blocks,
-    title: "Microsoft 365 Integration",
+    icon: Wallet,
+    title: "Direct Deposit (NACHA)",
     description:
-      "SharePoint Embedded for secure, private document storage per organization. Outlook for email notifications, Planner for automatic task synchronization, and Azure AD for enterprise single sign-on.",
+      "Generate a PPD credit ACH file for any approved run. Per-tenant originator profile, employee bank details, and an audit trail of every export — ready to hand to your bank.",
     highlight: false,
     color: "from-blue-500 to-cyan-600",
     lightColor: "bg-blue-50 dark:bg-blue-950/40",
     iconColor: "text-blue-600 dark:text-blue-400",
   },
   {
-    icon: Brain,
-    title: "AI-Powered Intelligence",
+    icon: Landmark,
+    title: "Taxes, YTD & GL",
     description:
-      "Powered by Azure AI Foundry with advanced models including GPT-5.4. AI-generated estimate narratives, status reports, invoice descriptions, and smart insights that accelerate your consulting practice.",
+      "Real YTD accumulators for SS wage base, Additional Medicare, and FUTA. Federal single / MFJ / HoH brackets, rule-driven state withholding, and a GL export aligned to your chart of accounts.",
     highlight: false,
     color: "from-amber-500 to-orange-600",
     lightColor: "bg-amber-50 dark:bg-amber-950/40",
     iconColor: "text-amber-600 dark:text-amber-400",
   },
   {
-    icon: FileBarChart,
-    title: "Status Reports & Financials",
+    icon: Users,
+    title: "Self-Service Paystubs",
     description:
-      "Comprehensive financial reporting with revenue, cost, profit, and margin analysis by client and project. KPI dashboards and project health scoring at a glance.",
+      "Each enrolled person sees their own finalized paystub history with full earnings, taxes, and deductions broken down. Drafts and previews never leak — only finalized runs are visible.",
     highlight: false,
     color: "from-rose-500 to-pink-600",
     lightColor: "bg-rose-50 dark:bg-rose-950/40",
     iconColor: "text-rose-600 dark:text-rose-400",
   },
   {
-    icon: AlertTriangle,
-    title: "Risk & Issue Management",
+    icon: FileBarChart,
+    title: "Tax Filing Prep",
     description:
-      "Track risks, actions, issues, decisions, and dependencies (RAIDD) at both portfolio and project levels. Stay ahead of problems before they impact delivery.",
+      "Quarterly 941 totals and annual W-2 / 1099-NEC summaries roll up from finalized runs. Hand the numbers straight to your accountant — or wire your own filing pipeline on top of the API.",
     highlight: false,
     color: "from-sky-500 to-indigo-600",
     lightColor: "bg-sky-50 dark:bg-sky-950/40",
@@ -87,23 +88,23 @@ const features = [
 const capabilities = [
   {
     icon: Shield,
-    title: "Multi-Tenant Isolation",
-    description: "Complete data isolation across organizations with role-based access control.",
+    title: "One Source of Truth",
+    description: "Your internal users list IS your employee roster. Enroll in payroll with a single toggle — no duplicate records.",
   },
   {
-    icon: Users,
-    title: "Resource Planning",
-    description: "Capacity planning with timeline views, conflict detection, and utilization tracking.",
+    icon: Receipt,
+    title: "Immutable Finalized Runs",
+    description: "Finalized payroll is locked. Corrections happen via reversal runs so historical filings always reconcile.",
   },
   {
     icon: Cloud,
-    title: "Cloud-Native Platform",
-    description: "Modern SaaS architecture with Azure AD SSO and enterprise-grade security.",
+    title: "Multi-Tenant & SSO",
+    description: "Per-tenant isolation with Azure AD / Entra ID single sign-on for the whole team.",
   },
   {
     icon: Zap,
-    title: "Automated Workflows",
-    description: "Scheduled jobs, email reminders, and automated invoice generation.",
+    title: "Automated Accruals",
+    description: "PTO accrues on every finalize and decrements on hours used. No spreadsheets to chase.",
   },
 ];
 
@@ -139,37 +140,38 @@ export default function Home() {
             <div className="flex items-center gap-2 mb-4">
               <Star className="w-5 h-5 text-amber-400 fill-amber-400" />
               <span className="text-amber-300 text-sm font-medium tracking-wide uppercase">
-                Consulting Delivery Platform
+                Gemini Payroll
               </span>
             </div>
             <h1 className="text-4xl lg:text-5xl xl:text-6xl font-bold text-white leading-tight mb-6">
-              Navigate Your Projects
+              Payroll Built Into
               <br />
               <span className="cosmic-text">
-                Like the Stars
+                Your Delivery Platform
               </span>
             </h1>
             <p className="text-lg lg:text-xl text-gray-300 max-w-2xl mb-8 leading-relaxed">
-              Constellation brings clarity to consulting delivery. From detailed
-              project estimates to automated invoicing, manage your entire
-              practice with precision and intelligence.
+              Gemini turns the people you already track into a payroll system.
+              Hours flow from time tracking, taxes are computed with real YTD
+              accumulators, and net pay leaves the building as a NACHA file —
+              all in one auditable run.
             </p>
             <div className="flex flex-wrap gap-4">
               <Button
                 size="lg"
-                onClick={() => navigate("/dashboard")}
+                onClick={() => navigate("/payroll")}
                 className="bg-gradient-to-r from-violet-600 to-blue-600 hover:from-violet-700 hover:to-blue-700 text-white px-8 py-3 text-base font-semibold shadow-lg shadow-violet-500/25"
               >
-                Go to Dashboard
+                Open Payroll Dashboard
                 <ArrowRight className="w-5 h-5 ml-2" />
               </Button>
               <Button
                 size="lg"
                 variant="outline"
-                onClick={() => navigate("/projects")}
+                onClick={() => navigate("/me/paystubs")}
                 className="border-white/30 text-white hover:bg-white/10 px-8 py-3 text-base font-semibold"
               >
-                View Estimates
+                My Paystubs
               </Button>
             </div>
           </div>
@@ -179,11 +181,12 @@ export default function Home() {
         <div className="px-6 py-16">
           <div className="text-center mb-12">
             <h2 className="text-3xl font-bold cosmic-text mb-3">
-              Everything You Need to Deliver Excellence
+              Everything Payroll Needs to Run Clean
             </h2>
             <p className="text-muted-foreground text-lg max-w-2xl mx-auto">
-              Purpose-built for consulting firms, Constellation covers every
-              aspect of project delivery and financial management.
+              Gemini covers the full payroll cycle — onboarding, hours,
+              taxes, deductions, disbursement, and filing prep — without
+              standing up a second system of record.
             </p>
           </div>
 
@@ -224,7 +227,7 @@ export default function Home() {
           </div>
         </div>
 
-        {/* Estimates Spotlight Section */}
+        {/* Spotlight Section */}
         <div className="relative overflow-hidden">
           <div
             className="absolute inset-0 bg-cover bg-center opacity-15 dark:opacity-10"
@@ -235,28 +238,28 @@ export default function Home() {
             <div className="max-w-6xl mx-auto grid grid-cols-1 lg:grid-cols-2 gap-12 items-center">
               <div>
                 <div className="flex items-center gap-2 mb-4">
-                  <Calculator className="w-5 h-5 text-violet-500" />
+                  <Brain className="w-5 h-5 text-violet-500" />
                   <span className="text-violet-500 dark:text-violet-400 text-sm font-semibold tracking-wide uppercase">
                     Spotlight
                   </span>
                 </div>
                 <h2 className="text-3xl font-bold text-foreground mb-4">
-                  Project Estimates That Win Work
+                  One Roster. One Source of Truth.
                 </h2>
                 <p className="text-muted-foreground text-base leading-relaxed mb-6">
-                  Constellation's estimation engine is purpose-built for
-                  consulting firms. Create detailed, multi-phase estimates with
-                  sophisticated rate hierarchies, resource planning, and
-                  AI-powered narrative generation.
+                  Flip a single toggle on a user record and Gemini provisions a
+                  linked payroll employee. Hours, rates, and tax setup live
+                  alongside the same person who shows up in your projects and
+                  time tracking — never in a second system.
                 </p>
                 <ul className="space-y-3 mb-8">
                   {[
-                    "Multi-phase estimates with epics, stages, and line items",
-                    "Hierarchical rate precedence (Project > User > Organization)",
-                    "Excel/CSV import/export with template support",
-                    "AI-generated narratives and text export",
-                    "Status-based locking and approval workflows",
-                    "T&M, Fixed Price, and Retainer estimate types",
+                    "Enroll a user in payroll with one click (W-2 or 1099)",
+                    "Hours auto-feed from approved time entries each period",
+                    "True YTD caps for SS wage base, Add'l Medicare, FUTA",
+                    "Full W-4 capture (filing status, multi-jobs, dependents, extra withholding)",
+                    "NACHA / ACH PPD credit file export per run",
+                    "Append-only audit log for SOC 2 evidence",
                   ].map((item) => (
                     <li key={item} className="flex items-start gap-3">
                       <ChevronRight className="w-4 h-4 text-violet-500 mt-1 flex-shrink-0" />
@@ -265,10 +268,10 @@ export default function Home() {
                   ))}
                 </ul>
                 <Button
-                  onClick={() => navigate("/projects")}
+                  onClick={() => navigate("/payroll/employees")}
                   className="bg-gradient-to-r from-violet-600 to-purple-600 hover:from-violet-700 hover:to-purple-700 text-white"
                 >
-                  Explore Estimates
+                  Open Employees
                   <ArrowRight className="w-4 h-4 ml-2" />
                 </Button>
               </div>
@@ -276,7 +279,7 @@ export default function Home() {
                 <div className="rounded-2xl overflow-hidden shadow-2xl shadow-black/20 border border-border/50">
                   <img
                     src={secondaryImage}
-                    alt="Constellation platform"
+                    alt="Gemini Payroll"
                     className="w-full h-auto object-cover"
                   />
                 </div>
@@ -286,8 +289,8 @@ export default function Home() {
                       <Zap className="w-5 h-5 text-emerald-600 dark:text-emerald-400" />
                     </div>
                     <div>
-                      <p className="text-sm font-semibold text-foreground">AI-Powered</p>
-                      <p className="text-xs text-muted-foreground">Smart narratives & insights</p>
+                      <p className="text-sm font-semibold text-foreground">Time → Pay</p>
+                      <p className="text-xs text-muted-foreground">Hours feed in automatically</p>
                     </div>
                   </div>
                 </div>
@@ -301,11 +304,12 @@ export default function Home() {
           <div className="max-w-6xl mx-auto">
             <div className="text-center mb-10">
               <h2 className="text-2xl font-bold text-foreground mb-3">
-                Built for Enterprise Consulting
+                Designed for the Audit
               </h2>
               <p className="text-muted-foreground max-w-xl mx-auto">
-                Security, scalability, and automation designed for professional
-                services organizations.
+                Tenant isolation, immutable runs, and append-only audit logs
+                make Gemini something your accountant and your security
+                reviewer can both sign off on.
               </p>
             </div>
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
@@ -335,27 +339,27 @@ export default function Home() {
         {/* CTA Footer */}
         <div className="px-6 py-12 text-center">
           <h2 className="text-2xl font-bold text-foreground mb-3">
-            Ready to Get Started?
+            Ready to Run Payroll?
           </h2>
           <p className="text-muted-foreground mb-6 max-w-lg mx-auto">
-            Jump into your dashboard to manage projects, create estimates, and
-            track your consulting practice.
+            Open the payroll dashboard to schedule a run, review an employee,
+            or export the next ACH file.
           </p>
           <div className="flex justify-center gap-4 flex-wrap">
             <Button
               size="lg"
-              onClick={() => navigate("/dashboard")}
+              onClick={() => navigate("/payroll")}
               className="bg-gradient-to-r from-violet-600 to-blue-600 hover:from-violet-700 hover:to-blue-700 text-white px-8"
             >
-              Open Dashboard
+              Open Payroll
               <ArrowRight className="w-5 h-5 ml-2" />
             </Button>
             <Button
               size="lg"
               variant="outline"
-              onClick={() => navigate("/user-guide")}
+              onClick={() => navigate("/payroll/runs")}
             >
-              View User Guide
+              View Payroll Runs
             </Button>
           </div>
         </div>

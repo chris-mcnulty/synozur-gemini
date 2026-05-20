@@ -78,6 +78,8 @@ import PayrollRuns from "@/pages/payroll-runs";
 import PayrollRunDetail from "@/pages/payroll-run-detail";
 import PayrollGl from "@/pages/payroll-gl";
 import PayrollAudit from "@/pages/payroll-audit";
+import MyPaystubs from "@/pages/my-paystubs";
+import MyPaystubDetail from "@/pages/my-paystub-detail";
 import { useQuery } from "@tanstack/react-query";
 import { Redirect, useLocation } from "wouter";
 import { useEffect, useState } from "react";
@@ -506,6 +508,13 @@ function Router() {
       </Route>
       <Route path="/payroll/audit">
         {user ? <PermissionGuard allowedRoles={["admin", "billing-admin"]}><PayrollAudit /></PermissionGuard> : <Redirect to="/login" />}
+      </Route>
+      {/* Employee self-service paystubs (any authenticated user) */}
+      <Route path="/me/paystubs">
+        {user ? <MyPaystubs /> : <Redirect to="/login" />}
+      </Route>
+      <Route path="/me/paystubs/:runId">
+        {user ? <MyPaystubDetail /> : <Redirect to="/login" />}
       </Route>
       {/* Fallback to 404 */}
       <Route component={NotFound} />

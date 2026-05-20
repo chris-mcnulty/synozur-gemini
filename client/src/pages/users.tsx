@@ -1,6 +1,6 @@
 import { useState, useMemo, useEffect } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
-import { useSearch } from "wouter";
+import { useSearch, Link } from "wouter";
 import { Layout } from "@/components/layout/layout";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -458,6 +458,7 @@ export default function Users() {
                     <TableHead>Roles</TableHead>
                     <TableHead>Weekly Hrs</TableHead>
                     <TableHead>Charge Rate</TableHead>
+                    <TableHead>Payroll</TableHead>
                     <TableHead>Status</TableHead>
                     <TableHead>Actions</TableHead>
                   </TableRow>
@@ -544,7 +545,23 @@ export default function Users() {
                         {user.defaultBillingRate ? `$${user.defaultBillingRate}` : '-'}
                       </TableCell>
                       <TableCell>
-                        <Badge 
+                        {user.payrollEmployeeId ? (
+                          <Link href={`/payroll/employees/${user.payrollEmployeeId}`}>
+                            <Badge
+                              variant={user.payrollEmployeeStatus === 'terminated' ? 'outline' : 'default'}
+                              className="cursor-pointer text-xs font-normal"
+                              data-testid={`badge-payroll-${user.id}`}
+                            >
+                              {user.payrollEmployeeType === '1099' ? '1099' : 'W-2'}
+                              {user.payrollEmployeeStatus === 'terminated' ? ' (terminated)' : ''}
+                            </Badge>
+                          </Link>
+                        ) : (
+                          <span className="text-muted-foreground text-xs">-</span>
+                        )}
+                      </TableCell>
+                      <TableCell>
+                        <Badge
                           variant={user.isActive ? "default" : "destructive"}
                           className={user.isActive ? "" : "opacity-75"}
                         >
@@ -604,6 +621,7 @@ export default function Users() {
               const firstName = formData.get('firstName') as string;
               const lastName = formData.get('lastName') as string;
               const email = formData.get('email') as string;
+              const payrollType = formData.get('payrollEmployeeType') as string;
               createUser.mutate({
                 name: `${firstName} ${lastName}`,
                 firstName,
@@ -617,6 +635,7 @@ export default function Users() {
                 defaultCostRate: formData.get('defaultCostRate'),
                 isSalaried: formData.get('isSalaried') === 'on',
                 isActive: true,
+                payrollEmployeeType: payrollType && payrollType !== 'none' ? payrollType : null,
               });
             }}>
               <div className="grid gap-4 py-4">
@@ -734,6 +753,17 @@ export default function Users() {
                   />
                   <Label htmlFor="isSalaried">Salaried (Time not counted as direct project cost)</Label>
                 </div>
+                <div className="grid gap-2">
+                  <Label htmlFor="payrollEmployeeType">Payroll Enrollment</Label>
+                  <Select name="payrollEmployeeType" defaultValue="none">
+                    <SelectTrigger data-testid="select-payroll-type"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="none">Not enrolled</SelectItem>
+                      <SelectItem value="w2">W-2 employee (auto-create payroll record)</SelectItem>
+                      <SelectItem value="1099">1099 contractor (auto-create payroll record)</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
               </div>
               <DialogFooter>
                 <Button type="button" variant="outline" onClick={() => setCreateDialogOpen(false)}>
@@ -763,6 +793,7 @@ export default function Users() {
                 const weeklyCapacityHours = formData.get('weeklyCapacityHours') as string;
                 const capacityNotes = formData.get('capacityNotes') as string;
                 const capacityEffectiveDate = formData.get('capacityEffectiveDate') as string;
+                const payrollType = formData.get('payrollEmployeeType') as string;
                 updateUser.mutate({
                   id: editingUser.id,
                   data: {
@@ -781,6 +812,7 @@ export default function Users() {
                     weeklyCapacityHours: weeklyCapacityHours || "40.00",
                     capacityNotes: capacityNotes || null,
                     capacityEffectiveDate: capacityEffectiveDate || null,
+                    payrollEmployeeType: payrollType === 'none' ? null : payrollType,
                   }
                 });
               }}>
@@ -900,6 +932,29 @@ export default function Users() {
                       defaultChecked={editingUser.isActive}
                     />
                     <Label htmlFor="edit-active">Active</Label>
+                  </div>
+
+                  <div className="border-t pt-4 mt-2">
+                    <Label className="text-sm font-semibold mb-3 block">Payroll Enrollment</Label>
+                    <Select name="payrollEmployeeType" defaultValue={editingUser.payrollEmployeeType ?? 'none'}>
+                      <SelectTrigger data-testid="select-edit-payroll-type"><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="none">Not enrolled</SelectItem>
+                        <SelectItem value="w2">W-2 employee</SelectItem>
+                        <SelectItem value="1099">1099 contractor</SelectItem>
+                      </SelectContent>
+                    </Select>
+                    {editingUser.payrollEmployeeId && (
+                      <p className="text-xs text-muted-foreground mt-2">
+                        Linked to payroll record:{' '}
+                        <Link href={`/payroll/employees/${editingUser.payrollEmployeeId}`}>
+                          <span className="text-primary underline cursor-pointer">open</span>
+                        </Link>
+                      </p>
+                    )}
+                    <p className="text-xs text-muted-foreground mt-1">
+                      Switching to "Not enrolled" terminates the linked payroll record but preserves history.
+                    </p>
                   </div>
 
                   {/* Capacity Profile Section */}
