@@ -22,6 +22,10 @@ import {
 import { buildNachaFile, type NachaEntry } from "../services/nacha";
 import { encryptString, decryptString, maskLast4 } from "../services/crypto";
 import { render941Html, renderW2Csv, renderW3Csv, render1099NecCsv } from "../services/tax-forms";
+import {
+  buildEfw2File, buildFire1099NecFile,
+  type Efw2Employee, type FirePayee,
+} from "../services/tax-forms-efile";
 
 interface PayrollRouteDeps {
   requireAuth: any;
@@ -592,6 +596,188 @@ export function registerPayrollRoutes(app: Express, deps: PayrollRouteDeps) {
       res.setHeader('Content-Type', 'text/csv');
       res.setHeader('Content-Disposition', `attachment; filename="1099-nec-${year}.csv"`);
       res.send(render1099NecCsv(totals as any));
+    } catch (e: any) { res.status(400).json({ message: e.message }); }
+  });
+
+  // ---- E-file: SSA EFW2 (W-2) ---------------------------------------------
+  // Generates the fixed-width 512-char EFW2 file uploadable to SSA BSO.
+  // The filer must supply their BSO User ID and EIN (not stored in schema
+  // yet — passed in the POST body). Test against SSA AccuWage before
+  // production submission.
+  const efw2Body = z.object({
+    year: z.coerce.number().int(),
+    submitter: z.object({
+      userId: z.string().min(8).max(8),
+      ein: z.string(),
+      name: z.string(),
+      addressLine1: z.string(),
+      addressLine2: z.string().optional(),
+      city: z.string(),
+      stateCode: z.string().length(2),
+      zip: z.string(),
+      contactName: z.string(),
+      contactPhone: z.string(),
+      contactEmail: z.string().optional(),
+    }),
+    employer: z.object({
+      ein: z.string(),
+      name: z.string(),
+      addressLine1: z.string(),
+      addressLine2: z.string().optional(),
+      city: z.string(),
+      stateCode: z.string().length(2),
+      zip: z.string(),
+    }).optional(),
+  });
+
+  app.post('/api/payroll/tax-forms/w2-efw2', requireAuth, PM, async (req, res) => {
+    try {
+      const tenantId = tenantOf(req);
+      const body = efw2Body.parse(req.body);
+      const totals = await payrollStorage.taxTotals(
+        tenantId, `${body.year}-01-01`, `${body.year}-12-31`,
+      );
+      const employees = await payrollStorage.listEmployees(tenantId, true);
+      const empById = new Map(employees.map(e => [e.id, e]));
+      const efw2Employees: Efw2Employee[] = totals.w2Employees
+        .map((t: any) => {
+          const emp = empById.get(t.employeeId);
+          if (!emp || !emp.ssnLast4) return null; // EFW2 requires a full SSN
+          return {
+            ssn: emp.ssnLast4.padStart(9, '0'), // stubbed: real full SSN must come from PII vault
+            firstName: emp.firstName,
+            lastName: emp.lastName,
+            addressLine1: emp.homeAddress ?? '',
+            city: emp.homeCity ?? '',
+            stateCode: emp.homeStateCode ?? '',
+            zip: emp.homeZip ?? '',
+            wagesCents: t.taxableWagesCents,
+            fedIncomeTaxCents: t.fedIncomeTaxCents,
+            ssWagesCents: t.ssWagesCents,
+            ssTaxCents: Math.round(t.ssWagesCents * 0.062),
+            medicareWagesCents: t.medicareWagesCents,
+            medicareTaxCents: Math.round(t.medicareWagesCents * 0.0145),
+          } as Efw2Employee;
+        })
+        .filter((e: Efw2Employee | null): e is Efw2Employee => e !== null);
+      if (efw2Employees.length === 0) {
+        return res.status(400).json({
+          message: 'No W-2 employees with full SSN on file for the year.',
+        });
+      }
+      // Default employer info from the ACH originator profile if not supplied.
+      const ach = await payrollStorage.getAchOriginator(tenantId);
+      const employer = body.employer ?? (ach ? {
+        ein: ach.companyId.replace(/^1/, ''), // ACH carries '1' + EIN
+        name: ach.companyName,
+        addressLine1: '',
+        city: '',
+        stateCode: '',
+        zip: '',
+      } : null);
+      if (!employer) {
+        return res.status(400).json({
+          message: 'Employer info not provided and no ACH originator profile to fall back on.',
+        });
+      }
+      const file = buildEfw2File({
+        taxYear: body.year,
+        submitter: body.submitter,
+        employer,
+        employees: efw2Employees,
+      });
+      res.setHeader('Content-Type', 'text/plain; charset=ascii');
+      res.setHeader('Content-Disposition', `attachment; filename="W2REPORT.${body.year}.txt"`);
+      res.send(file);
+    } catch (e: any) { res.status(400).json({ message: e.message }); }
+  });
+
+  // ---- E-file: IRS FIRE 1099-NEC ------------------------------------------
+  // Generates the fixed-width 750-char FIRE file for 1099-NEC. Requires
+  // the filer's IRS-issued TCC (Transmitter Control Code).
+  const fireBody = z.object({
+    year: z.coerce.number().int(),
+    transmitter: z.object({
+      tcc: z.string().length(5),
+      tin: z.string(),
+      name: z.string(),
+      addressLine1: z.string(),
+      city: z.string(),
+      stateCode: z.string().length(2),
+      zip: z.string(),
+      contactName: z.string(),
+      contactPhone: z.string(),
+      contactEmail: z.string().optional(),
+      testFile: z.boolean().optional(),
+    }),
+    payer: z.object({
+      tin: z.string(),
+      nameControl: z.string().max(4).optional(),
+      name: z.string(),
+      addressLine1: z.string(),
+      city: z.string(),
+      stateCode: z.string().length(2),
+      zip: z.string(),
+      phone: z.string().optional(),
+    }).optional(),
+  });
+
+  app.post('/api/payroll/tax-forms/1099-nec-fire', requireAuth, PM, async (req, res) => {
+    try {
+      const tenantId = tenantOf(req);
+      const body = fireBody.parse(req.body);
+      const totals = await payrollStorage.taxTotals(
+        tenantId, `${body.year}-01-01`, `${body.year}-12-31`,
+      );
+      const employees = await payrollStorage.listEmployees(tenantId, true);
+      const empById = new Map(employees.map(e => [e.id, e]));
+      const payees: FirePayee[] = totals.form1099Recipients
+        .map((r: any) => {
+          const emp = empById.get(r.employeeId);
+          if (!emp) return null;
+          // 1099 thresholds: skip recipients under $600 NEC for the year.
+          if (r.grossCents < 60000) return null;
+          return {
+            tin: (emp.ssnLast4 ?? '').padStart(9, '0'), // stub — real TIN from contractor W-9
+            tinType: 2 as const, // SSN; flip to 1 for EIN-based contractors
+            name: `${emp.firstName} ${emp.lastName}`,
+            addressLine1: emp.homeAddress ?? '',
+            city: emp.homeCity ?? '',
+            stateCode: emp.homeStateCode ?? '',
+            zip: emp.homeZip ?? '',
+            necCents: r.grossCents,
+            fedTaxWithheldCents: 0, // backup withholding not modeled yet
+          } as FirePayee;
+        })
+        .filter((p: FirePayee | null): p is FirePayee => p !== null);
+      if (payees.length === 0) {
+        return res.status(400).json({
+          message: 'No 1099-NEC recipients above the $600 reporting threshold.',
+        });
+      }
+      const ach = await payrollStorage.getAchOriginator(tenantId);
+      const payer = body.payer ?? (ach ? {
+        tin: ach.companyId.replace(/^1/, ''),
+        name: ach.companyName,
+        addressLine1: '',
+        city: '',
+        stateCode: '',
+        zip: '',
+      } : null);
+      if (!payer) {
+        return res.status(400).json({
+          message: 'Payer info not provided and no ACH originator profile to fall back on.',
+        });
+      }
+      const file = buildFire1099NecFile({
+        taxYear: body.year,
+        transmitter: body.transmitter,
+        payer,
+        payees,
+      });
+      res.setHeader('Content-Type', 'text/plain; charset=ascii');
+      res.setHeader('Content-Disposition', `attachment; filename="IRSTAX.${body.year}.txt"`);
+      res.send(file);
     } catch (e: any) { res.status(400).json({ message: e.message }); }
   });
 

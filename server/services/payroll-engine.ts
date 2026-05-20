@@ -277,8 +277,18 @@ export function computePayroll(inp: PayrollEngineInputs): PayrollEngineResult {
       // No resolved state means no state tax applies. This guards against
       // accidentally applying every active state jurisdiction to an employee
       // whose home + work states are both blank.
-      if (!withholdingState) continue;
-      if (j.code !== `US-${withholdingState}`) continue;
+      const stateParent = (j.rule as any)?.parentState;
+      if (stateParent) {
+        // Sub-state codes like US-WA-PFML, US-WA-CARES use parentState
+        // for matching. Wage premiums (PFML, Cares) follow work state, not
+        // the reciprocity-resolved withholding state — they're tied to
+        // where the employer paid the wages, not where the worker lives.
+        if (!inp.employee.workStateCode) continue;
+        if (stateParent !== inp.employee.workStateCode) continue;
+      } else {
+        if (!withholdingState) continue;
+        if (j.code !== `US-${withholdingState}`) continue;
+      }
     }
     if (j.level === 'local') {
       // Locals require a work state (municipal taxes are jurisdictional,
@@ -291,6 +301,19 @@ export function computePayroll(inp: PayrollEngineInputs): PayrollEngineResult {
     const rule = j.rule || {};
     if (rule.kind === 'flat_percent' && typeof rule.employeePct === 'number') {
       const t = pctOfCents(federalTaxableWages, rule.employeePct);
+      if (t > 0) {
+        stateLocalEmployeeTax += t;
+        lines.push({ category: 'employee_tax', label: `${j.name} (${j.code})`, amountCents: -t });
+      }
+    } else if (rule.kind === 'wage_premium' && typeof rule.employeePct === 'number') {
+      // Wage-premium employee portion (WA PFML, WA Cares). Uses FICA-taxable
+      // wages (not federal-taxable) because PFML/Cares follow gross-with-Section-125
+      // semantics, and respects an optional per-premium wage cap.
+      const cap = typeof rule.wageBaseCents === 'number' ? rule.wageBaseCents : Infinity;
+      const ytd = inp.ytdFutaWagesCents ?? 0;
+      const remaining = Math.max(0, cap - ytd);
+      const basis = Math.min(ficaTaxableWages, remaining);
+      const t = pctOfCents(basis, rule.employeePct);
       if (t > 0) {
         stateLocalEmployeeTax += t;
         lines.push({ category: 'employee_tax', label: `${j.name} (${j.code})`, amountCents: -t });
@@ -338,19 +361,51 @@ export function computePayroll(inp: PayrollEngineInputs): PayrollEngineResult {
       }
     }
   }
-  // TODO: state unemployment (SUTA) by jurisdiction.
+  // Employer-side state/local wage premiums. Two rule kinds are supported:
+  //   - flat_percent with employerPct (legacy)
+  //   - wage_premium with employerPct (WA PFML and similar split premiums)
+  // Both are scoped to the employee's work state — without scoping, a single
+  // jurisdiction's employer portion would apply to every employee regardless
+  // of where they work. Locals follow parentState the same way income-tax
+  // locals do (NYC, Philly). wage_premium also supports its own wageBaseCents
+  // cap, independent of FICA/FUTA.
   let employerStateLocal = 0;
-  for (const j of inp.jurisdictions.filter(x => x.isActive)) {
+  for (const j of inp.jurisdictions.filter(x => x.isActive && (x.level === 'state' || x.level === 'local'))) {
     const rule = j.rule || {};
+    const parent = (rule as any).parentState as string | undefined;
+    if (j.level === 'state') {
+      if (!inp.employee.workStateCode) continue;
+      if (parent) {
+        if (parent !== inp.employee.workStateCode) continue;
+      } else if (j.code !== `US-${inp.employee.workStateCode}`) {
+        continue;
+      }
+    } else {
+      if (!inp.employee.workStateCode) continue;
+      if (parent && parent !== inp.employee.workStateCode) continue;
+    }
     if (rule.kind === 'flat_percent' && typeof rule.employerPct === 'number') {
-      employerStateLocal += pctOfCents(ficaTaxableWages, rule.employerPct);
+      const t = pctOfCents(ficaTaxableWages, rule.employerPct);
+      if (t > 0) {
+        employerStateLocal += t;
+        lines.push({ category: 'employer_tax', label: `${j.name} (employer)`, amountCents: t });
+      }
+    } else if (rule.kind === 'wage_premium' && typeof rule.employerPct === 'number') {
+      const cap = typeof rule.wageBaseCents === 'number' ? rule.wageBaseCents : Infinity;
+      const ytd = inp.ytdFutaWagesCents ?? 0; // approximate cap-tracking; refines once a per-premium YTD lands
+      const remaining = Math.max(0, cap - ytd);
+      const basis = Math.min(ficaTaxableWages, remaining);
+      const t = pctOfCents(basis, rule.employerPct);
+      if (t > 0) {
+        employerStateLocal += t;
+        lines.push({ category: 'employer_tax', label: `${j.name} (employer)`, amountCents: t });
+      }
     }
   }
   const employerTaxCents = employerSS + employerMedicare + futa + suta + employerStateLocal;
   if (employerSS) lines.push({ category: 'employer_tax', label: 'Employer SS', amountCents: employerSS });
   if (employerMedicare) lines.push({ category: 'employer_tax', label: 'Employer Medicare', amountCents: employerMedicare });
   if (futa) lines.push({ category: 'employer_tax', label: 'FUTA', amountCents: futa });
-  if (employerStateLocal) lines.push({ category: 'employer_tax', label: 'Employer state/local', amountCents: employerStateLocal });
 
   // ---- Post-tax deductions and garnishments ----
   let postTaxCents = 0;

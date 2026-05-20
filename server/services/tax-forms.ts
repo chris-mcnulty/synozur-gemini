@@ -5,8 +5,8 @@
  * for annual filings (W-2 box totals, W-3 transmittal summary, 1099-NEC).
  * These are NOT IRS-filing-ready PDFs — they're accountant-input
  * artifacts. Accountants paste totals into their filing software (Drake,
- * Lacerte, CCH, ProSystem fx); SSA EFW2 / IRS FIRE generation is a
- * separate downstream concern.
+ * Lacerte, CCH, ProSystem fx). For direct e-filing, see
+ * `tax-forms-efile.ts` (SSA EFW2 for W-2/W-3, IRS FIRE for 1099-NEC).
  *
  * All cent inputs are integer cents; dollar formatting happens here.
  */
