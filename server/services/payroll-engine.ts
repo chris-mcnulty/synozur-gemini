@@ -55,6 +55,10 @@ export interface PayrollEngineResult {
   grossCents: number;
   preTaxDeductionCents: number;
   taxableWagesCents: number;
+  // Wages subject to FICA + FUTA (gross minus Section 125 deductions only —
+  // 401(k) traditional deferrals are still FICA-taxable). Persisted on the
+  // run item so YTD caps + W-2 Box 5 don't have to re-derive it.
+  ficaTaxableWagesCents: number;
   employeeTaxCents: number;
   employerTaxCents: number;
   postTaxDeductionCents: number;
@@ -186,6 +190,9 @@ export function computePayroll(inp: PayrollEngineInputs): PayrollEngineResult {
       grossCents,
       preTaxDeductionCents: 0,
       taxableWagesCents: grossCents,
+      // 1099 wages are not FICA-taxable, so the FICA wage base is 0 even
+      // though grossCents is the 1099 payment amount.
+      ficaTaxableWagesCents: 0,
       employeeTaxCents: 0,
       employerTaxCents: 0,
       postTaxDeductionCents: 0,
@@ -380,6 +387,7 @@ export function computePayroll(inp: PayrollEngineInputs): PayrollEngineResult {
     grossCents,
     preTaxDeductionCents: preTaxCents,
     taxableWagesCents: federalTaxableWages,
+    ficaTaxableWagesCents: ficaTaxableWages,
     employeeTaxCents,
     employerTaxCents,
     postTaxDeductionCents: postTaxCents,

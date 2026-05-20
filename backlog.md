@@ -24,21 +24,28 @@ The current sweep closes the highest-impact gaps; remaining items below.
 - [x] Tax totals endpoint (`/api/payroll/tax-totals?period=quarter|year|custom`)
 - [x] PTO accrual + decrement hooked into `finalizeRun`
 - [x] Employee self-service paystubs (`/me/paystubs` + `/me/paystubs/:runId`)
+- [x] AES-256-GCM encryption of bank account numbers (envelope, `PAYROLL_ENCRYPTION_KEY`, fail-closed)
+- [x] W-4 Step 2(c) multiple-jobs withholding adjustment (halve standard deduction per Pub 15-T)
+- [x] Bracket-based state withholding (CA, NY, NJ, PA) + NYC and Philadelphia local taxes
+- [x] SUTA per state (rule-driven, scoped to employee work state)
+- [x] Section 125 vs 401(k) traditional FICA treatment (`pre_tax_scope` on deductions; FICA wage base persisted per run item)
+- [x] Reversal runs (`POST /api/payroll/runs/:id/reverse`)
+- [x] Multi-state reciprocity (15 reciprocal pairs; engine resolves home vs work state for withholding)
+- [x] Garnishment split into its own GL category (`garnishment_liability`) in the GL export
+- [x] Form 941 + Schedule B printable HTML; W-2 / W-3 / 1099-NEC CSVs (artifact-only, not e-file)
 
 **Remaining P1 (in priority order):**
-- [ ] **Encrypted bank account storage** — `bankAccountNumberEnc` column exists but currently holds plain text. Wire envelope encryption (KMS / per-tenant key) before processing real direct deposits. Decrypt only in the NACHA generator.
-- [ ] **W-4 multiple-jobs adjustment in withholding** — checkbox is captured and persisted, but the engine does not yet adjust withholding when set. IRS Pub 15-T provides a separate bracket table; implement.
-- [ ] **State income tax matrix** — engine supports a rule-driven `flat_percent` mode only. Add bracket-based withholding for CA (DE-4), NY (IT-2104), and the top 10 states by headcount; add local taxes for NYC and Philadelphia.
-- [ ] **SUTA per jurisdiction** — currently only FUTA is computed. Add state unemployment with per-state rate + wage base.
-- [ ] **Section 125 / 401(k) FICA treatment** — the engine treats all pre-tax deductions as FICA-exempt for simplicity. 401(k) deferrals are FICA-taxable; health/HSA pre-tax are not. Split the deduction model.
-- [ ] **941 quarterly filing PDF + Schedule B** — tax-totals endpoint provides the numbers; generate the actual 941 PDF and semi-weekly deposit schedule.
-- [ ] **W-2 / W-3 / 1099-NEC artifact generation** — produce the SSA EFW2 (e-file W-2) and IRS 1099 forms from year totals.
-- [ ] **Reversal / off-cycle runs** — `void` only works pre-finalize. Add a negative-amount reversal run for finalized payroll, plus off-cycle bonus / commission run UX.
-- [ ] **Reciprocity & multi-state withholding** — when home and work states differ, apply reciprocity rules (NJ/PA, IL/IN, etc.) and split withholding.
+- [ ] **State withholding matrix beyond CA/NY/NJ/PA** — bracket tables for the next ~10 states by headcount (TX has no state income tax; covers MA, IL, GA, NC, VA, OH, WA-PFML, CO, MN, MI). Existing engine `kind: 'brackets'` is ready; just need data.
+- [ ] **State-specific SUTA experience rates** — platform seeds the new-employer rate per state; tenants need a UI to override with the experience-rated percentage their state assigned.
+- [ ] **SSA EFW2 + IRS FIRE e-file** — current artifacts are CSV/HTML for accountant input. Generate the actual SSA EFW2 fixed-width W-2 file and the IRS FIRE 1099 file for direct e-filing.
+- [ ] **941 PDF via Puppeteer** — current 941 endpoint returns printable HTML. Add a `?format=pdf` variant rendered via the existing puppeteer pipeline (already used by invoicing).
+- [ ] **Off-cycle / bonus run UX** — schema and runType `'bonus'` are in place but the create-run flow doesn't let admins pick a subset of employees yet.
 - [ ] **Per-period accruals other than PTO** — sick leave, parental leave, jury duty caps.
-- [ ] **Garnishment splits** — engine collapses garnishments into post-tax bucket; expose separate GL category and Title III priority ordering.
+- [ ] **Title III garnishment priority ordering** — current model treats each garnishment independently; multiple garnishments should follow IRS / DOL ordering (federal tax → child support → student loans → consumer creditors → state tax).
 - [ ] **Payment cycle SLA monitoring** — alert when a scheduled run has not been previewed/approved within N days of pay date.
 - [ ] **Audit log retention + export** — currently append-only with no retention policy or exportable evidence package.
+- [ ] **Per diem accountable vs non-accountable split** — when per diem exceeds the federal rate, the spillover is taxable wages; current reimbursement path treats everything as accountable.
+- [ ] **HSA / health benefit reimbursements** — currently flow through the standard reimbursement path; they're actually pre-tax (Box 12 codes), not tax-free.
 
 ---
 

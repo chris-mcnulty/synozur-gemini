@@ -1229,8 +1229,12 @@ export const expenses = pgTable("expenses", {
   reimbursementBatchId: varchar("reimbursement_batch_id"), // Will reference reimbursementBatches
   // Payroll integration: when the reimbursement was paid via a payroll run
   // (Gemini), this points at the run item it rode in on. Mutually exclusive
-  // with reimbursementBatchId in normal operation.
-  payrollRunItemId: varchar("payroll_run_item_id"),
+  // with reimbursementBatchId in normal operation. ON DELETE SET NULL so a
+  // reversed run releasing its items doesn't break the expense.
+  payrollRunItemId: varchar("payroll_run_item_id").references(
+    (): any => payrollRunItems.id,
+    { onDelete: 'set null' },
+  ),
   payrollReimbursedAt: timestamp("payroll_reimbursed_at"),
   clientPaidAt: timestamp("client_paid_at"), // When client paid for this expense via invoice batch
   createdAt: timestamp("created_at").notNull().default(sql`now()`),
@@ -4400,9 +4404,12 @@ export const payrollEmployees = pgTable("payroll_employees", {
   bankRoutingNumber: varchar("bank_routing_number", { length: 9 }),
   // AES-256-GCM ciphertext envelope formatted as
   //   v1:<iv-b64(16)>:<tag-b64(24)>:<ciphertext-b64(...)>
-  // For a 17-digit account number the envelope is ~70 characters; longer
-  // account numbers (some international) plus future version prefixes
-  // need room to grow. 256 chars covers the foreseeable maximum.
+  // New writes go through `encryptString` in server/services/crypto.ts and
+  // fail closed when PAYROLL_ENCRYPTION_KEY is unset. Legacy rows that
+  // pre-date encryption may still be plain text and round-trip as-is until
+  // the next admin save, at which point they get encrypted. For a 17-digit
+  // account number the envelope is ~70 characters; 256 chars leaves room
+  // for longer account numbers and future version prefixes.
   bankAccountNumberEnc: varchar("bank_account_number_enc", { length: 256 }),
   bankAccountType: varchar("bank_account_type", { length: 16 }), // 'checking' | 'savings'
   // Soft delete for compliance
@@ -4613,6 +4620,11 @@ export const payrollRunItems = pgTable("payroll_run_items", {
   employerTaxCents: integer("employer_tax_cents").notNull().default(0),
   preTaxDeductionCents: integer("pre_tax_deduction_cents").notNull().default(0),
   postTaxDeductionCents: integer("post_tax_deduction_cents").notNull().default(0),
+  // Wages subject to FICA / FUTA this period (gross minus Section 125 only,
+  // because 401(k) traditional deferrals are still FICA-taxable). Persisted
+  // so YTD caps + Form 941 line 5c + W-2 Box 5 don't have to re-derive it
+  // from preTaxDeductionCents (which mixes both scopes).
+  ficaTaxableWagesCents: integer("fica_taxable_wages_cents").notNull().default(0),
   // Constellation expense reimbursements rolled into this run item. Added
   // to net pay AFTER tax math (accountable-plan, non-taxable). Not part of
   // grossCents and never reported on the W-2 / 941 totals.
@@ -4639,7 +4651,11 @@ export const payrollReimbursementLines = pgTable("payroll_reimbursement_lines", 
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
   tenantId: varchar("tenant_id").notNull().references(() => tenants.id, { onDelete: 'cascade' }),
   runItemId: varchar("run_item_id").notNull().references(() => payrollRunItems.id, { onDelete: 'cascade' }),
-  expenseId: varchar("expense_id").notNull(),
+  // Restrict on delete so an in-flight payroll reimbursement can't be
+  // orphaned by deleting the underlying expense — finalize is the only
+  // path that removes the link (by clearing payrollRunItemId on the
+  // expense, not by deleting the line itself).
+  expenseId: varchar("expense_id").notNull().references(() => expenses.id, { onDelete: 'restrict' }),
   amountCents: integer("amount_cents").notNull(),
   category: text("category").notNull(),
   description: text("description"),

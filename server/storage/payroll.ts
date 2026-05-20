@@ -76,8 +76,23 @@ export const payrollStorage = {
       .set({ deletedAt: new Date(), status: 'terminated' })
       .where(and(eq(payrollEmployees.tenantId, tenantId), eq(payrollEmployees.id, id)))
       .returning({ userId: payrollEmployees.userId });
+    // users.payrollEmployeeType is GLOBAL but payroll_employees rows are
+    // tenant-scoped. Only clear the global flag when the user has no
+    // remaining active (non-soft-deleted, non-terminated) payroll record in
+    // ANY tenant — otherwise terminating a user in tenant A would silently
+    // un-enroll them in tenant B as well.
     if (row?.userId) {
-      await db.update(users).set({ payrollEmployeeType: null as any }).where(eq(users.id, row.userId));
+      const remaining = await db.select({ id: payrollEmployees.id })
+        .from(payrollEmployees)
+        .where(and(
+          eq(payrollEmployees.userId, row.userId),
+          isNull(payrollEmployees.deletedAt),
+          sql`${payrollEmployees.status} != 'terminated'`,
+        ))
+        .limit(1);
+      if (remaining.length === 0) {
+        await db.update(users).set({ payrollEmployeeType: null as any }).where(eq(users.id, row.userId));
+      }
     }
   },
 
@@ -133,8 +148,36 @@ export const payrollStorage = {
       .map(r => ({ id: r.id, name: r.name, email: r.email as string }));
   },
 
-  /** Keep users.payroll_employee_type aligned when changes originate on the payroll side. */
-  async syncUserEnrollmentFlag(userId: string, employeeType: string | null): Promise<void> {
+  /**
+   * Keep users.payroll_employee_type aligned when changes originate on the
+   * payroll side, but only when it's safe to do so. The flag is global; the
+   * payroll record is tenant-scoped. We only touch the global flag when the
+   * user has no OTHER active payroll record in any other tenant — otherwise
+   * setting it from tenant A would change tenant B's enrollment view too.
+   *
+   * Pass `currentTenantId` to exclude the tenant whose payroll record just
+   * changed (so we don't mistake "the record we just modified" for "another
+   * tenant's").
+   */
+  async syncUserEnrollmentFlag(
+    userId: string,
+    employeeType: string | null,
+    currentTenantId?: string,
+  ): Promise<void> {
+    const otherActive = await db.select({ id: payrollEmployees.id })
+      .from(payrollEmployees)
+      .where(and(
+        eq(payrollEmployees.userId, userId),
+        isNull(payrollEmployees.deletedAt),
+        sql`${payrollEmployees.status} != 'terminated'`,
+        currentTenantId ? sql`${payrollEmployees.tenantId} != ${currentTenantId}` : sql`true`,
+      ))
+      .limit(1);
+    if (otherActive.length > 0) {
+      // Another tenant has an active payroll record for this user; touching
+      // the global flag would clobber that tenant's enrollment state.
+      return;
+    }
     await db.update(users)
       .set({ payrollEmployeeType: employeeType as any })
       .where(eq(users.id, userId));
@@ -210,6 +253,7 @@ export const payrollStorage = {
     const rows = await db.select({
       gross: payrollRunItems.grossCents,
       preTax: payrollRunItems.preTaxDeductionCents,
+      ficaTaxable: payrollRunItems.ficaTaxableWagesCents,
     })
       .from(payrollRunItems)
       .innerJoin(payrollRuns, eq(payrollRunItems.runId, payrollRuns.id))
@@ -220,8 +264,17 @@ export const payrollStorage = {
         gte(payrollRuns.payDate, yearStart),
         lte(payrollRuns.payDate, payDate),
       ));
+    // Use the persisted FICA-taxable wages so 401(k) traditional deferrals
+    // still hit the SS / FUTA / Additional Medicare wage bases. Legacy rows
+    // pre-dating the column have 0 stored — fall back to gross - all pre-tax
+    // (the prior behaviour) so a partial roll-out doesn't blow up totals.
     let total = 0;
-    for (const r of rows) total += (r.gross ?? 0) - (r.preTax ?? 0);
+    for (const r of rows) {
+      const fica = (r.ficaTaxable ?? 0) > 0
+        ? (r.ficaTaxable ?? 0)
+        : Math.max(0, (r.gross ?? 0) - (r.preTax ?? 0));
+      total += fica;
+    }
     return { ytdSsWagesCents: total, ytdMedicareWagesCents: total, ytdFutaWagesCents: total };
   },
 
@@ -534,8 +587,9 @@ export const payrollStorage = {
         employerTaxCents: result.employerTaxCents,
         preTaxDeductionCents: result.preTaxDeductionCents,
         postTaxDeductionCents: result.postTaxDeductionCents,
+        ficaTaxableWagesCents: result.ficaTaxableWagesCents,
         netPayCents: result.netPayCents,
-        breakdown: { lines: result.lines, taxableWagesCents: result.taxableWagesCents },
+        breakdown: { lines: result.lines, taxableWagesCents: result.taxableWagesCents, ficaTaxableWagesCents: result.ficaTaxableWagesCents },
       }).returning();
       items.push(item);
 
@@ -695,6 +749,7 @@ export const payrollStorage = {
         employerTaxCents: -it.employerTaxCents,
         preTaxDeductionCents: -it.preTaxDeductionCents,
         postTaxDeductionCents: -it.postTaxDeductionCents,
+        ficaTaxableWagesCents: -((it as any).ficaTaxableWagesCents ?? 0),
         reimbursementCents: -((it as any).reimbursementCents ?? 0),
         netPayCents: -it.netPayCents,
         breakdown: { reversalOf: original.id, original: it.breakdown },
@@ -911,6 +966,7 @@ export const payrollStorage = {
       email: payrollEmployees.email,
       grossCents: payrollRunItems.grossCents,
       preTaxDeductionCents: payrollRunItems.preTaxDeductionCents,
+      ficaTaxableWagesCents: payrollRunItems.ficaTaxableWagesCents,
       employeeTaxCents: payrollRunItems.employeeTaxCents,
       employerTaxCents: payrollRunItems.employerTaxCents,
       netPayCents: payrollRunItems.netPayCents,
@@ -934,7 +990,15 @@ export const payrollStorage = {
     for (const r of rows) {
       const lines = (r.breakdown as any)?.lines ?? [];
       const fed = lines.filter((l: any) => l.label === 'Federal income tax').reduce((s: number, l: any) => s + Math.abs(l.amountCents), 0);
-      const taxableWages = r.grossCents - r.preTaxDeductionCents;
+      // Box 1 (federal taxable) wages: gross minus ALL pre-tax (Section 125
+      // and 401(k) traditional both reduce Box 1).
+      const federalTaxableWages = r.grossCents - r.preTaxDeductionCents;
+      // Box 3 / Box 5 (FICA / Medicare) wages: gross minus Section 125 only;
+      // 401(k) traditional is FICA-taxable. Fall back to the legacy
+      // derivation when the column hasn't been populated yet on older rows.
+      const ficaTaxableWages = (r.ficaTaxableWagesCents ?? 0) > 0
+        ? (r.ficaTaxableWagesCents ?? 0)
+        : federalTaxableWages;
       const ssLine = lines.find((l: any) => l.label === 'Social Security');
       const employerSs = lines.filter((l: any) => l.label === 'Employer SS').reduce((s: number, l: any) => s + l.amountCents, 0);
       const employerMc = lines.filter((l: any) => l.label === 'Employer Medicare').reduce((s: number, l: any) => s + l.amountCents, 0);
@@ -947,8 +1011,10 @@ export const payrollStorage = {
       const isW2 = r.employeeType === 'w2';
       if (isW2) {
         fedIncomeWithheld += fed;
-        ssWagesTotal += ssLine ? Math.round(Math.abs(ssLine.amountCents) / 0.062) : 0;
-        medicareWagesTotal += taxableWages;
+        // Prefer the persisted FICA wage base over back-calculation from
+        // ssLine, which can be capped mid-year and misrepresent the wage.
+        ssWagesTotal += ficaTaxableWages;
+        medicareWagesTotal += ficaTaxableWages;
         employerSsTotal += employerSs;
         employerMedicareTotal += employerMc;
       }
@@ -963,10 +1029,10 @@ export const payrollStorage = {
       // Per-employee W-2 fields stay zero for 1099 rows so the W-2 CSV
       // export doesn't surface withholding/FICA columns for contractors.
       if (isW2) {
-        e.taxableWagesCents += taxableWages;
+        e.taxableWagesCents += federalTaxableWages;
         e.fedIncomeTaxCents += fed;
-        e.ssWagesCents += ssLine ? Math.round(Math.abs(ssLine.amountCents) / 0.062) : 0;
-        e.medicareWagesCents += taxableWages;
+        e.ssWagesCents += ficaTaxableWages;
+        e.medicareWagesCents += ficaTaxableWages;
       }
       e.netPayCents += r.netPayCents;
       byEmployee.set(r.employeeId, e);

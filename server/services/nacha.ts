@@ -42,6 +42,10 @@ function pad(s: string, len: number, char = ' ', right = true): string {
 }
 const padR = (s: string, len: number) => pad(s, len, ' ', true);
 const padL0 = (s: string | number, len: number) => pad(String(s), len, '0', false);
+// NACHA file-header routing fields are 10 chars but the routing number is
+// 9 digits — the leading char is conventionally a space, not a zero.
+// Zero-padding here can cause bank rejection on some ODFIs.
+const padL_ = (s: string | number, len: number) => pad(String(s), len, ' ', false);
 
 /** Compute the check digit for a 9-digit ABA routing number (modulo 10). */
 function checkRoutingDigit(r8: string): string {
@@ -82,8 +86,13 @@ export function buildNachaFile(
   lines.push([
     '1',
     '01',
-    padL0(originator.immediateDestination, 10),
-    padL0(originator.immediateOrigin, 10),
+    // immediate destination / origin are 10-char fields with a leading
+    // space (or 1 for FedACH IAT, etc.) when the underlying routing number
+    // is 9 digits. If the operator stored a literal 10-char value (already
+    // including the leading char) we leave it; otherwise we left-pad with
+    // a space so the file is accepted by ODFIs that reject leading zeros.
+    padL_(originator.immediateDestination, 10),
+    padL_(originator.immediateOrigin, 10),
     yymmdd,
     hhmm,
     fileIdModifier,
@@ -104,8 +113,12 @@ export function buildNachaFile(
     padR(originator.companyId, 10),
     'PPD',                              // standard entry class
     padR('PAYROLL', 10),
-    padR(`PAY DATE ${effectiveDate}`, 6).slice(0, 6),
-    effectiveDate,                      // YYMMDD effective entry date
+    // Company descriptive date: 6 chars, conventionally YYMMDD of the pay
+    // date. The earlier "PAY DATE ${effectiveDate}" string was truncated to
+    // "PAY DA" by the 6-char slice — losing the date entirely and surprising
+    // bank tellers who expected a YYMMDD.
+    effectiveDate,                      // descriptive date YYMMDD
+    effectiveDate,                      // effective entry date YYMMDD
     '   ',                              // settlement date (filled by ACH operator)
     '1',                                // originator status code
     padR(originator.originatingDfi, 8),

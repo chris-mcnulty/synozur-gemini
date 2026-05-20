@@ -114,9 +114,13 @@ export function registerPayrollRoutes(app: Express, deps: PayrollRouteDeps) {
         body.bankAccountNumberEnc = encryptString(body.bankAccountNumberEnc) as any;
       }
       const emp = await payrollStorage.createEmployee(body);
-      // Keep the user row's payroll flag consistent so both sides agree.
+      // Keep the global users.payroll_employee_type flag aligned, but only
+      // when this is the user's sole active payroll record across tenants
+      // (the helper itself enforces that gate). Passing currentTenantId
+      // excludes the row we just created from the "is another tenant
+      // already enrolled?" check.
       if (emp.userId) {
-        await payrollStorage.syncUserEnrollmentFlag(emp.userId, emp.employeeType);
+        await payrollStorage.syncUserEnrollmentFlag(emp.userId, emp.employeeType, tenantId);
       }
       await payrollStorage.appendAudit({
         tenantId, actorUserId: (req.user as any)?.id,
