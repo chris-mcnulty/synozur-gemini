@@ -10,7 +10,6 @@ packages = ["alsa-lib", "at-spi2-atk", "at-spi2-core", "atk", "cairo", "chromium
 run = ["sh", "-c", "npm start"]
 deploymentTarget = "autoscale"
 build = ["sh", "-c", "npm run build && npx tsx scripts/validate-agent-card.ts"]
-publicDir = "dist/public"
 
 [[ports]]
 localPort = 5000
