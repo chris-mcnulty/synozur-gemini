@@ -18,11 +18,10 @@ import type { Express, Request } from "express";
 import { z } from "zod";
 import { distributionStorage } from "../storage/distribution";
 import { payrollStorage } from "../storage/payroll";
+import { allocateDistribution, quarterBounds } from "../services/distribution-engine";
 import {
-  computeAvailableFunds, allocateDistribution,
-  fetchActiveOwners, fetchFteCandidates, fetchPolicy,
-  quarterBounds,
-} from "../services/distribution-engine";
+  computeAvailableFunds, fetchActiveOwners, fetchFteCandidates, fetchPolicy,
+} from "../services/distribution-data";
 import {
   buildNachaFile, validateRouting, type NachaEntry, type NachaOriginator,
 } from "../services/nacha";
