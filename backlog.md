@@ -426,26 +426,29 @@ Estimate approval/status transitions, invoice generation, line-item-level edits 
 - [x] Read-only banner shown to shared viewers on estimate detail page
 
 ### Quarterly Profit Distribution (Owners + FTE Bonus Pool)
-**Status:** Design doc drafted May 20, 2026 — `docs/design/quarterly-profit-distribution.md`
-**Effort:** Medium (~2 weeks: 1 week schema/engine, 1 week UI)
+**Status:** Backend shipped May 20, 2026; UI pending. Design: `docs/design/quarterly-profit-distribution.md`
+**Effort:** UI remaining (~1 week)
 
-Synozur owners (Michelle, Chris) currently have no in-product mechanism
-to take quarterly distributions, and there's no FTE profit-sharing pool.
-Drafted design covers both, integrated with the existing Gemini Payroll
-bonus-run path for FTE payouts and a new non-payroll ACH file for owner
-draws.
+Synozur owners (Michelle, Chris) now have an in-product mechanism for
+quarterly distributions plus an FTE profit-sharing pool. Backend covers
+the entire run lifecycle (draft → previewed → approved → finalized →
+reversed); UI surface is the only remaining gap.
 
-- [ ] Schema: `entity_owners`, `distribution_policy`, `distribution_runs`, `distribution_lines` (migration 0024)
-- [ ] Available-funds preview endpoint (cash-basis: revenue − expenses − payroll burden − tax reserve − operating reserve)
-- [ ] Owner pool allocation by ownership percent
-- [ ] FTE pool allocation by salary/tenure/performance/hours weights (defaults: 60/10/20/10)
-- [ ] FSM: draft → previewed → approved → finalized → reversed (mirrors payroll runs)
-- [ ] Owner non-payroll NACHA file (reuses `buildNachaFile`, separate originator profile)
-- [ ] FTE payout via supplemental payroll run (`runType: 'bonus'`)
-- [ ] WA B&O accrual line in available-funds calc (1.5% on services revenue for WA-domiciled tenants)
-- [ ] `is_owner` flag on `payroll_employees` so owner-employees don't double-dip in FTE pool
+- [x] Schema: `entity_owners`, `distribution_policy`, `distribution_runs`, `distribution_lines` (migration 0024)
+- [x] `is_owner` flag on `payroll_employees` so owner-employees don't double-dip in FTE pool
+- [x] Available-funds engine (cash-basis: revenue collected − non-reimbursable opex − payroll burden − tax reserve − operating reserve − WA B&O accrual)
+- [x] Owner pool allocation by ownership percent (with penny-drift sweep into largest share)
+- [x] FTE pool allocation by normalized salary/tenure/performance/hours weights (defaults: 60/10/20/10)
+- [x] FSM: draft → previewed → approved → finalized → reversed (mirrors payroll runs)
+- [x] Owner non-payroll NACHA file (reuses `buildNachaFile` with the tenant's existing ACH originator profile, separate from the payroll NACHA file)
+- [x] FTE payout creates a draft supplemental payroll run (`runType: 'bonus'`), bonusCents per line — admin previews/finalizes through the existing payroll page
+- [x] WA B&O accrual line in available-funds calc (configurable `wa_bo_rate_pct`)
+- [x] Full REST API: `/api/distributions/owners`, `/policy`, `/runs`, `/runs/:id/{preview,approve,finalize,reverse}`
 - [ ] Admin UI page `/distributions` mirroring `/payroll/runs`
-- [ ] Open questions for owners: entity tax election, reserve percentages, FTE weighting, payout cadence, fixed-date vs approve-then-pay (see design §9)
+- [ ] Performance review row per employee per quarter (today defaults to 3/5 mid)
+- [ ] Owners' bank account capture UI (today the field exists but no form)
+- [ ] Distribution-policy edit UI (today only via PATCH `/api/distributions/policy`)
+- [ ] Open questions for owners (still): entity tax election, reserve percentages, FTE weighting, payout cadence, fixed-date vs approve-then-pay (see design §9)
 
 ### Inbound 1099 Receipts (We Receive a 1099 from a Client) — RULED OUT
 **Status:** Out of scope for Constellation (May 20, 2026 decision)

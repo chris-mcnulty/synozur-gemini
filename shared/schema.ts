@@ -4412,6 +4412,9 @@ export const payrollEmployees = pgTable("payroll_employees", {
   // for longer account numbers and future version prefixes.
   bankAccountNumberEnc: varchar("bank_account_number_enc", { length: 256 }),
   bankAccountType: varchar("bank_account_type", { length: 16 }), // 'checking' | 'savings'
+  // Owners-who-are-also-W-2-employees opt out of the FTE bonus pool.
+  // Their distribution flows through entity_owners and the owner ACH file.
+  isOwner: boolean("is_owner").notNull().default(false),
   // Soft delete for compliance
   deletedAt: timestamp("deleted_at"),
   createdAt: timestamp("created_at").notNull().default(sql`now()`),
@@ -4720,3 +4723,122 @@ export const payrollAuditLog = pgTable("payroll_audit_log", {
 export const insertPayrollAuditLogSchema = createInsertSchema(payrollAuditLog).omit({ id: true, occurredAt: true });
 export type InsertPayrollAuditLog = z.infer<typeof insertPayrollAuditLogSchema>;
 export type PayrollAuditLog = typeof payrollAuditLog.$inferSelect;
+
+// -------------------------------------------------------------------------
+// Quarterly profit distribution (owners + FTE bonus pool).
+// See docs/design/quarterly-profit-distribution.md.
+// -------------------------------------------------------------------------
+
+// Who shares in the owner pool. A single user can be an owner of multiple
+// tenants (multi-tenant model); ownership_pct is per-tenant. Effective-dated
+// so an ownership change doesn't rewrite history. Active rows have
+// effective_to = NULL — one per (tenant, user) at a time.
+export const entityOwners = pgTable("entity_owners", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  tenantId: varchar("tenant_id").notNull().references(() => tenants.id, { onDelete: 'cascade' }),
+  userId: varchar("user_id").notNull().references(() => users.id, { onDelete: 'restrict' }),
+  ownershipPct: decimal("ownership_pct", { precision: 7, scale: 4 }).notNull(),
+  effectiveFrom: date("effective_from").notNull(),
+  effectiveTo: date("effective_to"),
+  distributionMethod: varchar("distribution_method", { length: 16 }).notNull().default('k1'),
+  // Bank account for the non-payroll owner ACH file. Same encryption envelope
+  // as payroll_employees.bank_account_number_enc.
+  bankRoutingNumber: varchar("bank_routing_number", { length: 9 }),
+  bankAccountNumberEnc: varchar("bank_account_number_enc", { length: 256 }),
+  bankAccountType: varchar("bank_account_type", { length: 16 }),
+  notes: text("notes"),
+  createdAt: timestamp("created_at").notNull().default(sql`now()`),
+  updatedAt: timestamp("updated_at").notNull().default(sql`now()`),
+}, (t) => ({
+  tenantIdx: index("idx_entity_owners_tenant").on(t.tenantId, t.effectiveFrom),
+}));
+
+export const insertEntityOwnerSchema = createInsertSchema(entityOwners).omit({
+  id: true, createdAt: true, updatedAt: true,
+});
+export type InsertEntityOwner = z.infer<typeof insertEntityOwnerSchema>;
+export type EntityOwner = typeof entityOwners.$inferSelect;
+
+// Per-tenant policy: pool split, reserves, FTE pool weighting.
+export const distributionPolicy = pgTable("distribution_policy", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  tenantId: varchar("tenant_id").notNull().references(() => tenants.id, { onDelete: 'cascade' }).unique(),
+  ownerPoolPct: decimal("owner_pool_pct", { precision: 7, scale: 4 }).notNull().default("70.0000"),
+  ftePoolPct: decimal("fte_pool_pct", { precision: 7, scale: 4 }).notNull().default("30.0000"),
+  taxReservePct: decimal("tax_reserve_pct", { precision: 7, scale: 4 }).notNull().default("25.0000"),
+  operatingReserveMonths: decimal("operating_reserve_months", { precision: 5, scale: 2 }).notNull().default("3.00"),
+  waBoRatePct: decimal("wa_bo_rate_pct", { precision: 7, scale: 4 }).notNull().default("0.0000"),
+  fteWeights: jsonb("fte_weights").$type<{ salary: number; tenure: number; performance: number; hours: number }>()
+    .notNull().default(sql`'{"salary":60,"tenure":10,"performance":20,"hours":10}'::jsonb`),
+  createdAt: timestamp("created_at").notNull().default(sql`now()`),
+  updatedAt: timestamp("updated_at").notNull().default(sql`now()`),
+});
+
+export const insertDistributionPolicySchema = createInsertSchema(distributionPolicy).omit({
+  id: true, createdAt: true, updatedAt: true,
+});
+export type InsertDistributionPolicy = z.infer<typeof insertDistributionPolicySchema>;
+export type DistributionPolicy = typeof distributionPolicy.$inferSelect;
+
+// One row per quarterly run. Immutable once finalized.
+export const distributionRuns = pgTable("distribution_runs", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  tenantId: varchar("tenant_id").notNull().references(() => tenants.id, { onDelete: 'cascade' }),
+  quarterLabel: varchar("quarter_label", { length: 7 }).notNull(), // '2026-Q3'
+  periodStart: date("period_start").notNull(),
+  periodEnd: date("period_end").notNull(),
+  status: varchar("status", { length: 20 }).notNull().default('draft'),
+  // Funds breakdown captured at preview time so audit survives policy edits.
+  availableFundsCents: integer("available_funds_cents").notNull().default(0),
+  revenueCollectedCents: integer("revenue_collected_cents").notNull().default(0),
+  operatingExpenseCents: integer("operating_expense_cents").notNull().default(0),
+  payrollBurdenCents: integer("payroll_burden_cents").notNull().default(0),
+  taxReserveCents: integer("tax_reserve_cents").notNull().default(0),
+  operatingReserveCents: integer("operating_reserve_cents").notNull().default(0),
+  waBoAccrualCents: integer("wa_bo_accrual_cents").notNull().default(0),
+  ownerPoolCents: integer("owner_pool_cents").notNull().default(0),
+  ftePoolCents: integer("fte_pool_cents").notNull().default(0),
+  policySnapshot: jsonb("policy_snapshot").$type<Record<string, any>>(),
+  ftePayrollRunId: varchar("fte_payroll_run_id").references(() => payrollRuns.id, { onDelete: 'set null' }),
+  reversesRunId: varchar("reverses_run_id"),
+  createdBy: varchar("created_by").references(() => users.id),
+  approvedBy: varchar("approved_by").references(() => users.id),
+  approvedAt: timestamp("approved_at"),
+  finalizedAt: timestamp("finalized_at"),
+  notes: text("notes"),
+  createdAt: timestamp("created_at").notNull().default(sql`now()`),
+}, (t) => ({
+  tenantIdx: index("idx_distribution_runs_tenant").on(t.tenantId, t.periodEnd),
+}));
+
+export const insertDistributionRunSchema = createInsertSchema(distributionRuns).omit({
+  id: true, createdAt: true, approvedAt: true, finalizedAt: true,
+});
+export type InsertDistributionRun = z.infer<typeof insertDistributionRunSchema>;
+export type DistributionRun = typeof distributionRuns.$inferSelect;
+
+// Per-recipient line within a run.
+export const distributionLines = pgTable("distribution_lines", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  tenantId: varchar("tenant_id").notNull().references(() => tenants.id, { onDelete: 'cascade' }),
+  runId: varchar("run_id").notNull().references(() => distributionRuns.id, { onDelete: 'cascade' }),
+  recipientUserId: varchar("recipient_user_id").notNull().references(() => users.id, { onDelete: 'restrict' }),
+  recipientType: varchar("recipient_type", { length: 16 }).notNull(), // 'owner' | 'fte'
+  amountCents: integer("amount_cents").notNull().default(0),
+  weight: decimal("weight", { precision: 14, scale: 6 }).notNull().default("0"),
+  payoutMethod: varchar("payout_method", { length: 20 }).notNull(),
+  payrollRunItemId: varchar("payroll_run_item_id").references(() => payrollRunItems.id, { onDelete: 'set null' }),
+  achTraceNumber: varchar("ach_trace_number", { length: 15 }),
+  status: varchar("status", { length: 16 }).notNull().default('pending'),
+  breakdown: jsonb("breakdown").$type<Record<string, any>>(),
+  createdAt: timestamp("created_at").notNull().default(sql`now()`),
+}, (t) => ({
+  runIdx: index("idx_distribution_lines_run").on(t.runId),
+  recipientIdx: index("idx_distribution_lines_recipient").on(t.tenantId, t.recipientUserId),
+}));
+
+export const insertDistributionLineSchema = createInsertSchema(distributionLines).omit({
+  id: true, createdAt: true,
+});
+export type InsertDistributionLine = z.infer<typeof insertDistributionLineSchema>;
+export type DistributionLine = typeof distributionLines.$inferSelect;

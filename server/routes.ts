@@ -48,6 +48,7 @@ import { registerCalendarSuggestionsRoutes } from "./routes/calendar-suggestions
 import { registerJobRoutes } from "./routes/jobs.js";
 import { registerNotificationRoutes } from "./routes/notifications.js";
 import { registerPayrollRoutes } from "./routes/payroll.js";
+import { registerDistributionRoutes } from "./routes/distribution.js";
 import { registerWebhookRoutes } from "./routes/webhooks.js";
 import { registerEmbedRoutes } from "./routes/embed.js";
 import { registerSearchRoutes } from "./routes/search.js";
@@ -553,6 +554,7 @@ export async function registerRoutes(app: Express): Promise<void> {
     registerJobRoutes(app, { requireAuth, requireRole });
     registerNotificationRoutes(app, { requireAuth });
     registerPayrollRoutes(app, { requireAuth, requireRole });
+    registerDistributionRoutes(app, { requireAuth, requireRole });
     registerWebhookRoutes(app);
     registerEmbedRoutes(app, { requireAuth, requireRole });
     registerSearchRoutes(app, { requireAuth });
