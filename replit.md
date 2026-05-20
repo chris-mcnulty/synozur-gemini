@@ -13,6 +13,7 @@ Constellation is a comprehensive platform for managing the entire consulting pro
 
 ## User Preferences
 Preferred communication style: Simple, everyday language.
+**STANDING INSTRUCTION — MERGED PRs**: Every time a task agent PR is merged into main, immediately inspect and integrate the incoming code with special attention to: (1) schema integrity — check for new/modified tables, columns, indexes, and foreign keys in `shared/schema.ts` and run `npm run db:push` if the schema changed; (2) database safety — verify all new queries enforce the tenant boundary (`tenantId` from session, never from client); (3) storage wiring — confirm new storage methods are added to `IStorage` and wired into `DatabaseStorage`; (4) route registration — confirm new route files are registered in `server/routes.ts`; (5) dependency conflicts — check `package.json` for version collisions. Report any issues found before considering the merge complete.
 User management should be consolidated into a single, unified view (like Vega) rather than separate admin pages.
 Prefer scope-based filtering over separate "Platform Users" vs "Tenant Users" pages.
 Multi-tenant user model: A user in one tenant can be a client in another tenant, so NO separate client_contacts table. Use the existing users table for all people across tenants.
