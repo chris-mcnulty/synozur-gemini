@@ -78,6 +78,8 @@ import PayrollRuns from "@/pages/payroll-runs";
 import PayrollRunDetail from "@/pages/payroll-run-detail";
 import PayrollGl from "@/pages/payroll-gl";
 import PayrollAudit from "@/pages/payroll-audit";
+import Distributions from "@/pages/distributions";
+import DistributionRunDetail from "@/pages/distribution-run-detail";
 import MyPaystubs from "@/pages/my-paystubs";
 import MyPaystubDetail from "@/pages/my-paystub-detail";
 import { useQuery } from "@tanstack/react-query";
@@ -508,6 +510,13 @@ function Router() {
       </Route>
       <Route path="/payroll/audit">
         {user ? <PermissionGuard allowedRoles={["admin", "billing-admin"]}><PayrollAudit /></PermissionGuard> : <Redirect to="/login" />}
+      </Route>
+      {/* Quarterly distributions (owners + FTE bonus pool) */}
+      <Route path="/distributions">
+        {user ? <PermissionGuard allowedRoles={["admin", "billing-admin"]}><Distributions /></PermissionGuard> : <Redirect to="/login" />}
+      </Route>
+      <Route path="/distributions/runs/:id">
+        {user ? <PermissionGuard allowedRoles={["admin", "billing-admin"]}><DistributionRunDetail /></PermissionGuard> : <Redirect to="/login" />}
       </Route>
       {/* Employee self-service paystubs (any authenticated user) */}
       <Route path="/me/paystubs">

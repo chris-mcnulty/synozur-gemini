@@ -134,7 +134,7 @@ interface SectionRoute {
 }
 
 const sectionRoutes: SectionRoute[] = [
-  { sectionId: "payroll", paths: ["/payroll", "/payroll/employees", "/payroll/schedules", "/payroll/runs", "/payroll/gl", "/payroll/audit"] },
+  { sectionId: "payroll", paths: ["/payroll", "/payroll/employees", "/payroll/schedules", "/payroll/runs", "/payroll/gl", "/payroll/audit", "/distributions"] },
   { sectionId: "my-workspace", paths: ["/my-dashboard", "/my-assignments", "/my-projects", "/time", "/expenses", "/expense-reports", "/my-reimbursements", "/my-raidd"] },
   { sectionId: "portfolio", paths: ["/", "/dashboard", "/portfolio/timeline", "/portfolio/raidd", "/reports", "/executive-narrative", "/projects", "/clients", "/resource-management", "/resource-planning", "/resource-planning/capacity", "/crm/deals"] },
   { sectionId: "financial", paths: ["/billing", "/invoice-report", "/client-revenue-report", "/expense-management", "/expense-approval", "/reimbursement-batches", "/rates"] },
@@ -254,6 +254,7 @@ export function MobileNav() {
                   <MobileNavItem href="/payroll/schedules" icon={<CalendarClock />} label="Pay Schedules" onClick={handleNavClick} />
                   <MobileSubGroupLabel label="Process" />
                   <MobileNavItem href="/payroll/runs" icon={<Banknote />} label="Payroll Runs" onClick={handleNavClick} />
+                  <MobileNavItem href="/distributions" icon={<Handshake />} label="Distributions" onClick={handleNavClick} />
                   <MobileSubGroupLabel label="Accounting" />
                   <MobileNavItem href="/payroll/gl" icon={<Calculator />} label="General Ledger" onClick={handleNavClick} />
                   <MobileNavItem href="/payroll/audit" icon={<ScrollText />} label="Audit Log" onClick={handleNavClick} />
