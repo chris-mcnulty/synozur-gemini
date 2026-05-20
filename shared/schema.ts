@@ -4808,6 +4808,15 @@ export const distributionRuns = pgTable("distribution_runs", {
   policySnapshot: jsonb("policy_snapshot").$type<Record<string, any>>(),
   ftePayrollRunId: varchar("fte_payroll_run_id").references(() => payrollRuns.id, { onDelete: 'set null' }),
   reversesRunId: varchar("reverses_run_id"),
+  // Preview warnings persisted on the run so the UI surfaces the same
+  // diagnostics that were visible at preview time, even after a refresh
+  // or once the run has moved past 'previewed'.
+  warnings: jsonb("warnings").$type<string[]>().notNull().default(sql`'[]'::jsonb`),
+  // NACHA effective date (yymmdd) captured at finalize so the download
+  // endpoint regenerates a byte-identical file every time it's served.
+  // The owner ACH content is never stored in the DB — bank accounts stay
+  // encrypted at rest in entity_owners; we re-decrypt on download.
+  nachaEffectiveDate: varchar("nacha_effective_date", { length: 6 }),
   createdBy: varchar("created_by").references(() => users.id),
   approvedBy: varchar("approved_by").references(() => users.id),
   approvedAt: timestamp("approved_at"),
@@ -4828,6 +4837,11 @@ export const distributionRuns = pgTable("distribution_runs", {
 
 export const insertDistributionRunSchema = createInsertSchema(distributionRuns).omit({
   id: true, createdAt: true, approvedAt: true, finalizedAt: true,
+  // `warnings` defaults to '[]' at the DB level. Omitted from the insert
+  // schema so callers don't have to pass it (and so drizzle-zod's tuple
+  // inference for $type<string[]>() doesn't fight the underlying
+  // Drizzle insert type).
+  warnings: true,
 });
 export type InsertDistributionRun = z.infer<typeof insertDistributionRunSchema>;
 export type DistributionRun = typeof distributionRuns.$inferSelect;

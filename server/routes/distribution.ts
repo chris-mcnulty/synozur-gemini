@@ -211,6 +211,9 @@ export function registerDistributionRoutes(app: Express, deps: Deps) {
           breakdown: l.breakdown,
         })),
       );
+      // Persist warnings on the run so the UI surfaces them even after a
+      // refresh, and once the run has moved past 'previewed' (where the
+      // user can no longer re-preview to regenerate them).
       const updated = await distributionStorage.updateRun(tenantId, run.id, {
         status: 'previewed',
         availableFundsCents: funds.availableFundsCents,
@@ -223,6 +226,7 @@ export function registerDistributionRoutes(app: Express, deps: Deps) {
         ownerPoolCents: preview.ownerPoolCents,
         ftePoolCents: preview.ftePoolCents,
         policySnapshot: policy,
+        warnings: preview.warnings,
       });
       res.json({ run: updated, preview });
     } catch (e: any) {
@@ -251,7 +255,93 @@ export function registerDistributionRoutes(app: Express, deps: Deps) {
     } catch (e: any) { res.status(400).json({ message: e.message }); }
   });
 
-  // Finalize: emits owner ACH file + creates supplemental payroll run for FTEs.
+  // Shared helper: produce the owner-pool NACHA file for a run. Used by
+  // finalize (to validate before persisting) and by the streaming download
+  // endpoint (to regenerate the file on demand without ever putting its
+  // contents in a JSON response). Pure read + cryptography — never writes.
+  // Throws on validation failures so the caller can map them to the right
+  // HTTP status.
+  async function buildOwnerAchForRun(
+    tenantId: string,
+    run: { id: string; nachaEffectiveDate: string | null },
+    ownerLines: Awaited<ReturnType<typeof distributionStorage.listLines>>,
+  ): Promise<{ content: string; effectiveDate: string; trace: string } | null> {
+    if (ownerLines.length === 0) return null;
+    const ach = await payrollStorage.getAchOriginator(tenantId);
+    if (!ach) {
+      throw Object.assign(new Error(
+        'No ACH originator profile on file. Configure under Payroll Settings before generating owner distributions.',
+      ), { httpStatus: 400 });
+    }
+    const owners = await distributionStorage.listOwners(tenantId);
+    const ownerByUser = new Map(owners.map(o => [o.userId, o]));
+    const entries: NachaEntry[] = [];
+    for (const l of ownerLines) {
+      const o = ownerByUser.get(l.recipientUserId);
+      if (!o) {
+        throw Object.assign(new Error(
+          `Owner ${l.recipient?.name ?? l.recipientUserId} has a distribution line but no entity_owners record.`,
+        ), { httpStatus: 400 });
+      }
+      if (!o.bankRoutingNumber || !o.bankAccountNumberEnc) {
+        throw Object.assign(new Error(
+          `Owner ${l.recipient?.name ?? l.recipientUserId} is missing bank details.`,
+        ), { httpStatus: 400 });
+      }
+      if (!validateRouting(o.bankRoutingNumber)) {
+        throw Object.assign(new Error(
+          `Owner ${l.recipient?.name ?? l.recipientUserId} has an invalid routing number.`,
+        ), { httpStatus: 400 });
+      }
+      let accountNumber: string | null = null;
+      try {
+        accountNumber = decryptString(o.bankAccountNumberEnc);
+      } catch {
+        // fall through
+      }
+      if (!accountNumber) {
+        throw Object.assign(new Error(
+          'Unable to decrypt an owner bank account. Check PAYROLL_ENCRYPTION_KEY.',
+        ), { httpStatus: 500 });
+      }
+      entries.push({
+        employeeName: l.recipient?.name ?? 'OWNER',
+        employeeId: l.recipientUserId.slice(0, 15),
+        routingNumber: o.bankRoutingNumber,
+        accountNumber,
+        accountType: (o.bankAccountType as 'checking' | 'savings') ?? 'checking',
+        amountCents: l.amountCents,
+      });
+    }
+    const originator: NachaOriginator = {
+      companyName: ach.companyName,
+      companyId: ach.companyId,
+      originatingDfi: ach.originatingDfi,
+      immediateOriginName: ach.immediateOriginName,
+      immediateOrigin: ach.immediateOrigin,
+      immediateDestinationName: ach.immediateDestinationName,
+      immediateDestination: ach.immediateDestination,
+    };
+    // Effective date: use the value captured at finalize time so re-downloads
+    // produce byte-identical files. If finalize hasn't stamped one yet (i.e.
+    // this is the finalize call itself), generate from today.
+    let effectiveDate = run.nachaEffectiveDate ?? '';
+    if (!effectiveDate) {
+      const today = new Date();
+      effectiveDate =
+        String(today.getUTCFullYear() % 100).padStart(2, '0') +
+        String(today.getUTCMonth() + 1).padStart(2, '0') +
+        String(today.getUTCDate()).padStart(2, '0');
+    }
+    const content = buildNachaFile(originator, entries, effectiveDate).content;
+    return { content, effectiveDate, trace: `DIST-${run.id.slice(0, 8)}` };
+  }
+
+  // Finalize: validates everything, emits the owner NACHA file once,
+  // captures its effective date on the run, and creates a draft bonus
+  // payroll run for FTE pool lines. The NACHA file body is NOT returned
+  // in the JSON response — fetch it via GET /owner-ach to keep plaintext
+  // routing/account numbers out of API logs and devtools history.
   //
   // Two-phase shape so partial failures don't strand state:
   //   Phase 1 (no writes): load lines, validate bank/employee data, decrypt
@@ -261,7 +351,10 @@ export function registerDistributionRoutes(app: Express, deps: Deps) {
   //                              link FTE lines to payroll items (status
   //                              stays 'pending' until the bonus payroll
   //                              run actually finalizes), update the
-  //                              distribution run to 'finalized'.
+  //                              distribution run to 'finalized' and
+  //                              stamp the NACHA effective date so the
+  //                              download endpoint regenerates an
+  //                              identical file.
   // If anything in phase 1 fails we 4xx without writes. If anything in
   // phase 2 fails the transaction rolls back atomically.
   //
@@ -281,72 +374,15 @@ export function registerDistributionRoutes(app: Express, deps: Deps) {
       }
       const lines = await distributionStorage.listLines(tenantId, run.id);
 
-      // ---- Phase 1: validate + build the NACHA file -----------------------
+      // ---- Phase 1: validate + build the NACHA file (no writes) ----------
       const ownerLines = lines.filter(l => l.recipientType === 'owner' && l.amountCents > 0);
       const fteLines = lines.filter(l => l.recipientType === 'fte' && l.amountCents > 0);
 
-      let ownerAchFile: string | null = null;
-      let ownerAchTrace = '';
-      if (ownerLines.length > 0) {
-        const ach = await payrollStorage.getAchOriginator(tenantId);
-        if (!ach) {
-          return res.status(400).json({
-            message: 'No ACH originator profile on file. Configure under Payroll Settings before finalizing owner distributions.',
-          });
-        }
-        const owners = await distributionStorage.listOwners(tenantId);
-        const ownerByUser = new Map(owners.map(o => [o.userId, o]));
-        const entries: NachaEntry[] = [];
-        for (const l of ownerLines) {
-          const o = ownerByUser.get(l.recipientUserId);
-          if (!o) {
-            return res.status(400).json({
-              message: `Owner ${l.recipient?.name ?? l.recipientUserId} has a distribution line but no entity_owners record.`,
-            });
-          }
-          if (!o.bankRoutingNumber || !o.bankAccountNumberEnc) {
-            return res.status(400).json({
-              message: `Owner ${l.recipient?.name ?? l.recipientUserId} is missing bank details.`,
-            });
-          }
-          if (!validateRouting(o.bankRoutingNumber)) {
-            return res.status(400).json({
-              message: `Owner ${l.recipient?.name ?? l.recipientUserId} has an invalid routing number.`,
-            });
-          }
-          let accountNumber: string | null = null;
-          try {
-            accountNumber = decryptString(o.bankAccountNumberEnc);
-          } catch {
-            // fall through
-          }
-          if (!accountNumber) {
-            return res.status(500).json({
-              message: 'Unable to decrypt an owner bank account. Check PAYROLL_ENCRYPTION_KEY.',
-            });
-          }
-          entries.push({
-            employeeName: l.recipient?.name ?? 'OWNER',
-            employeeId: l.recipientUserId.slice(0, 15),
-            routingNumber: o.bankRoutingNumber,
-            accountNumber,
-            accountType: (o.bankAccountType as 'checking' | 'savings') ?? 'checking',
-            amountCents: l.amountCents,
-          });
-        }
-        const originator: NachaOriginator = {
-          companyName: ach.companyName,
-          companyId: ach.companyId,
-          originatingDfi: ach.originatingDfi,
-          immediateOriginName: ach.immediateOriginName,
-          immediateOrigin: ach.immediateOrigin,
-          immediateDestinationName: ach.immediateDestinationName,
-          immediateDestination: ach.immediateDestination,
-        };
-        const today = new Date();
-        const yymmdd = `${String(today.getUTCFullYear() % 100).padStart(2, '0')}${String(today.getUTCMonth() + 1).padStart(2, '0')}${String(today.getUTCDate()).padStart(2, '0')}`;
-        ownerAchFile = buildNachaFile(originator, entries, yymmdd).content;
-        ownerAchTrace = `DIST-${run.id.slice(0, 8)}`;
+      let nachaResult: { content: string; effectiveDate: string; trace: string } | null = null;
+      try {
+        nachaResult = await buildOwnerAchForRun(tenantId, run, ownerLines);
+      } catch (e: any) {
+        return res.status(e.httpStatus ?? 500).json({ message: e.message });
       }
 
       // FTE: validate every line has a payroll_employee before we open the tx.
@@ -392,27 +428,35 @@ export function registerDistributionRoutes(app: Express, deps: Deps) {
           }
           ftePayrollRunId = newRun.id;
         }
-        for (const l of ownerLines) {
-          await distributionStorage.markOwnerLineIssued(tx, tenantId, l.id, ownerAchTrace);
+        if (nachaResult) {
+          for (const l of ownerLines) {
+            await distributionStorage.markOwnerLineIssued(tx, tenantId, l.id, nachaResult.trace);
+          }
         }
         const [updatedRun] = await tx.update(distributionRuns)
           .set({
             status: 'finalized',
             finalizedAt: new Date(),
             ftePayrollRunId: ftePayrollRunId ?? undefined,
+            nachaEffectiveDate: nachaResult?.effectiveDate,
           })
           .where(and(eq(distributionRuns.tenantId, tenantId), eq(distributionRuns.id, run.id)))
           .returning();
         return { updatedRun, ftePayrollRunId };
       });
 
+      // Deliberately don't return the NACHA file body in this JSON
+      // response — plaintext routing/account numbers belong only on the
+      // streaming download endpoint (see GET /owner-ach below).
       res.json({
         run: updatedRun,
-        ownerAchFile,
         ftePayrollRunId,
+        ownerAchAvailable: nachaResult !== null,
         message: ftePayrollRunId
-          ? 'Owner ACH file emitted (lines status=issued); FTE bonus payroll run created in draft — preview and finalize it from /payroll/runs to disburse and flip FTE lines to paid.'
-          : 'Owner ACH file emitted (lines status=issued). No FTE bonus pool this quarter.',
+          ? 'Owner ACH file ready (download via /owner-ach); FTE bonus payroll run created in draft — preview and finalize it from /payroll/runs to disburse and flip FTE lines to paid.'
+          : nachaResult
+            ? 'Owner ACH file ready (download via /owner-ach). No FTE bonus pool this quarter.'
+            : 'Run finalized. No owner pool and no FTE pool this quarter.',
       });
     } catch (e: any) {
       // eslint-disable-next-line no-console
@@ -441,5 +485,47 @@ export function registerDistributionRoutes(app: Express, deps: Deps) {
         note: 'Distribution run marked reversed. FTE bonus payroll run (if any) was NOT auto-reversed — reverse it separately from /payroll/runs if needed.',
       });
     } catch (e: any) { res.status(400).json({ message: e.message }); }
+  });
+
+  // Owner ACH download. Regenerates the NACHA file on demand using the
+  // effective date captured at finalize, so re-downloads are byte-identical.
+  // Streams as text/plain attachment — the file contents are never
+  // serialized inside a JSON response or other middleware-friendly format,
+  // which keeps plaintext routing/account numbers out of access logs,
+  // gateway caches, and browser devtools history.
+  app.get('/api/distributions/runs/:id/owner-ach', requireAuth, PM, async (req, res) => {
+    try {
+      const tenantId = tenantOf(req);
+      const run = await distributionStorage.getRun(tenantId, req.params.id);
+      if (!run) return res.status(404).json({ message: 'Run not found' });
+      if (run.status !== 'finalized') {
+        return res.status(409).json({
+          message: `Owner ACH file is only available for finalized runs (this run is ${run.status}).`,
+        });
+      }
+      const lines = await distributionStorage.listLines(tenantId, run.id);
+      const ownerLines = lines.filter(l => l.recipientType === 'owner' && l.amountCents > 0);
+      let result: { content: string; effectiveDate: string; trace: string } | null = null;
+      try {
+        result = await buildOwnerAchForRun(tenantId, run, ownerLines);
+      } catch (e: any) {
+        return res.status(e.httpStatus ?? 500).json({ message: e.message });
+      }
+      if (!result) {
+        return res.status(404).json({ message: 'This run has no owner pool to disburse.' });
+      }
+      res.setHeader('Content-Type', 'text/plain; charset=ascii');
+      // Prevent intermediaries from caching plaintext bank details.
+      res.setHeader('Cache-Control', 'private, no-store, max-age=0');
+      res.setHeader(
+        'Content-Disposition',
+        `attachment; filename="distribution-owner-ach-${run.quarterLabel}.txt"`,
+      );
+      res.send(result.content);
+    } catch (e: any) {
+      // eslint-disable-next-line no-console
+      console.error('owner ACH download failed', e);
+      res.status(500).json({ message: e.message });
+    }
   });
 }

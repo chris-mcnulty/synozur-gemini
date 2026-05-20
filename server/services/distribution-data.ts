@@ -9,10 +9,13 @@
 import { db } from "../db";
 import { and, eq, gte, lte, sql } from "drizzle-orm";
 import {
-  invoiceBatches, expenses, payrollRuns, payrollEmployees, payrollCompensation,
-  timeEntries, entityOwners, distributionPolicy,
+  invoiceBatches, expenses, payrollRuns, payrollEmployees,
+  entityOwners, distributionPolicy,
   type DistributionPolicy, type EntityOwner,
 } from "@shared/schema";
+// Note: payrollCompensation and timeEntries are referenced by raw SQL below
+// (DISTINCT ON + GROUP BY queries) rather than via the Drizzle table objects,
+// so they intentionally aren't imported from the schema module.
 import type { AvailableFundsBreakdown, FtePoolCandidate } from "./distribution-engine";
 
 const toCents = (decimal: string | number | null | undefined): number => {

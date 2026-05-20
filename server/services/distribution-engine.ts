@@ -22,18 +22,6 @@ import type {
   DistributionPolicy, EntityOwner, PayrollEmployee,
 } from "@shared/schema";
 
-const toCents = (decimal: string | number | null | undefined): number => {
-  if (decimal == null) return 0;
-  const n = typeof decimal === 'number' ? decimal : Number(decimal);
-  if (!Number.isFinite(n)) return 0;
-  return Math.round(n * 100);
-};
-
-const pct = (cents: number, pctValue: string | number): number => {
-  const p = typeof pctValue === 'number' ? pctValue : Number(pctValue);
-  return Math.round((cents * p) / 100);
-};
-
 /** Compute quarter start/end from a label like '2026-Q3'. */
 export function quarterBounds(label: string): { start: string; end: string } {
   const m = /^(\d{4})-Q([1-4])$/.exec(label);

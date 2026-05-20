@@ -67,6 +67,21 @@ function fOptDigits(value: string | null | undefined, width: number): string {
   return '0'.repeat(width - d.length) + d;
 }
 
+/** 9-character ZIP for FIRE / EFW2 fields that pack ZIP5 + ZIP4 into one
+ *  contiguous field. A bare 5-digit ZIP must occupy the first 5 chars; the
+ *  remaining 4 are the +4 extension (zeros when absent). Using a generic
+ *  zero-pad would shift a 5-digit ZIP to the right (e.g. "02139" →
+ *  "000002139", turning the last four into the extension and corrupting
+ *  the ZIP itself). */
+function fZip9(zip: string | null | undefined): string {
+  const d = String(zip ?? '').replace(/\D/g, '');
+  if (d.length === 0) return ' '.repeat(9);
+  const zip5 = d.slice(0, 5).padStart(5, '0');
+  const ext = d.slice(5, 9);
+  const ext4 = ext.length === 0 ? '0000' : ext.padEnd(4, '0');
+  return zip5 + ext4;
+}
+
 /** Pad a single line out to `width` if shorter; truncate if longer. */
 function pad(line: string, width: number): string {
   if (line.length === width) return line;
@@ -371,7 +386,7 @@ function buildT(t: FireTransmitter, taxYear: number): string {
     fText(t.addressLine1, 40) +             // 190-229 Company address
     fText(t.city, 40) +                     // 230-269 Company city
     fText(t.stateCode, 2) +                 // 270-271 State
-    fDigits(t.zip, 9) +                     // 272-280 ZIP
+    fZip9(t.zip) +                          // 272-280 ZIP (ZIP5+ZIP4 packed)
     ' '.repeat(15) +                        // 281-295 Blank
     fNum(0, 8) +                            // 296-303 Total payees (fill at end of file? IRS spec fills 0 here, recount on F record)
     fText(t.contactName, 40) +              // 304-343 Contact name
@@ -417,7 +432,7 @@ function buildA(p: FirePayer, taxYear: number, sequenceNum: number): string {
     fText(p.addressLine1, 40) +             // 134-173 Payer address
     fText(p.city, 40) +                     // 174-213 Payer city
     fText(p.stateCode, 2) +                 // 214-215
-    fDigits(p.zip, 9) +                     // 216-224
+    fZip9(p.zip) +                          // 216-224 ZIP (ZIP5+ZIP4 packed)
     fDigits(p.phone ?? '', 15) +            // 225-239
     ' '.repeat(260) +                       // 240-499 Blank
     fNum(sequenceNum, 8) +                  // 500-507 Sequence
@@ -464,7 +479,7 @@ function buildB(p: FirePayee, taxYear: number, sequenceNum: number): string {
     fText(p.addressLine1, 40) +             // 305-344
     fText(p.city, 40) +                     // 345-384
     fText(p.stateCode, 2) +                 // 385-386
-    fDigits(p.zip, 9) +                     // 387-395
+    fZip9(p.zip) +                          // 387-395 ZIP (ZIP5+ZIP4 packed)
     ' ' +                                   // 396 Blank
     ' '.repeat(103) +                       // 397-499 Blank
     fNum(sequenceNum, 8) +                  // 500-507

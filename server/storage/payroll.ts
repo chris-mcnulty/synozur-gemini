@@ -1000,6 +1000,17 @@ export const payrollStorage = {
         ? (r.ficaTaxableWagesCents ?? 0)
         : federalTaxableWages;
       const ssLine = lines.find((l: any) => l.label === 'Social Security');
+      // Employee-side SS / Medicare / Additional-Medicare withholdings,
+      // pulled from the run breakdown so the EFW2 / W-2 Box 4 + 6 reflect
+      // what was actually withheld (not a recomputation from wages, which
+      // ignores SS cap behavior, rounding, and the 0.9% threshold).
+      const employeeSs = Math.abs(ssLine?.amountCents ?? 0);
+      const employeeMc = lines
+        .filter((l: any) => l.label === 'Medicare')
+        .reduce((s: number, l: any) => s + Math.abs(l.amountCents), 0);
+      const employeeAddlMc = lines
+        .filter((l: any) => l.label === 'Additional Medicare')
+        .reduce((s: number, l: any) => s + Math.abs(l.amountCents), 0);
       const employerSs = lines.filter((l: any) => l.label === 'Employer SS').reduce((s: number, l: any) => s + l.amountCents, 0);
       const employerMc = lines.filter((l: any) => l.label === 'Employer Medicare').reduce((s: number, l: any) => s + l.amountCents, 0);
 
@@ -1023,7 +1034,9 @@ export const payrollStorage = {
         employeeId: r.employeeId, name: `${r.firstName} ${r.lastName}`, email: r.email,
         employeeType: r.employeeType,
         grossCents: 0, taxableWagesCents: 0, fedIncomeTaxCents: 0,
-        ssWagesCents: 0, medicareWagesCents: 0, netPayCents: 0,
+        ssWagesCents: 0, ssTaxCents: 0,
+        medicareWagesCents: 0, medicareTaxCents: 0, additionalMedicareTaxCents: 0,
+        netPayCents: 0,
       };
       e.grossCents += r.grossCents;
       // Per-employee W-2 fields stay zero for 1099 rows so the W-2 CSV
@@ -1032,7 +1045,10 @@ export const payrollStorage = {
         e.taxableWagesCents += federalTaxableWages;
         e.fedIncomeTaxCents += fed;
         e.ssWagesCents += ficaTaxableWages;
+        e.ssTaxCents += employeeSs;
         e.medicareWagesCents += ficaTaxableWages;
+        e.medicareTaxCents += employeeMc;
+        e.additionalMedicareTaxCents += employeeAddlMc;
       }
       e.netPayCents += r.netPayCents;
       byEmployee.set(r.employeeId, e);

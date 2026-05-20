@@ -5,7 +5,7 @@
  */
 
 import { db } from "../db";
-import { and, eq, desc, sql, inArray } from "drizzle-orm";
+import { and, eq, desc } from "drizzle-orm";
 
 // Drizzle's `tx` argument inside `db.transaction((tx) => ...)` is a
 // PgTransaction, not the base NeonDatabase, but both expose the same

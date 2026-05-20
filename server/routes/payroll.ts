@@ -666,9 +666,14 @@ export function registerPayrollRoutes(app: Express, deps: PayrollRouteDeps) {
             wagesCents: t.taxableWagesCents,
             fedIncomeTaxCents: t.fedIncomeTaxCents,
             ssWagesCents: t.ssWagesCents,
-            ssTaxCents: Math.round(t.ssWagesCents * 0.062),
+            // Box 4 / Box 6 reflect actual withholding from the run
+            // breakdown — not a recomputation from wages, which would
+            // miss SS cap behavior, rounding, and the 0.9% Add'l
+            // Medicare threshold. Add'l Medicare folds into Box 6 per
+            // IRS Pub 15 (it's still Medicare tax on the W-2).
+            ssTaxCents: t.ssTaxCents,
             medicareWagesCents: t.medicareWagesCents,
-            medicareTaxCents: Math.round(t.medicareWagesCents * 0.0145),
+            medicareTaxCents: t.medicareTaxCents + t.additionalMedicareTaxCents,
           };
         })
         .filter((e: Efw2Employee | null): e is Efw2Employee => e !== null);

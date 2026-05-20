@@ -53,7 +53,17 @@ export interface TaxTotalsInput {
     taxableWagesCents: number;
     fedIncomeTaxCents: number;
     ssWagesCents: number;
+    // Actual withheld amounts pulled from the run breakdown. ssTaxCents
+    // and medicareTaxCents come from the 'Social Security' / 'Medicare'
+    // lines on each run item; additionalMedicareTaxCents tracks the
+    // 0.9% surcharge applied above the $200K single / $250K MFJ threshold.
+    // Sourcing from the breakdown (instead of recomputing rate × wages)
+    // keeps the totals consistent with what was actually deposited and
+    // handles SS cap behavior + rounding correctly.
+    ssTaxCents: number;
     medicareWagesCents: number;
+    medicareTaxCents: number;
+    additionalMedicareTaxCents: number;
     netPayCents: number;
   }>;
   form1099Recipients: Array<{

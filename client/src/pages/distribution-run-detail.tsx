@@ -13,15 +13,17 @@ export default function DistributionRunDetail() {
   const { id } = useParams<{ id: string }>();
   const { toast } = useToast();
   const { data, isLoading } = useQuery<any>({ queryKey: ["/api/distributions/runs", id] });
-  const [ownerAchFile, setOwnerAchFile] = useState<string | null>(null);
+  // ftePayrollRunId is the only piece of finalize-response state that's not
+  // already on the run record itself. Warnings come from `run.warnings`
+  // (persisted in the DB) so they survive a refresh and remain visible
+  // once the run advances past 'previewed'.
   const [ftePayrollRunId, setFtePayrollRunId] = useState<string | null>(null);
-  const [warnings, setWarnings] = useState<string[]>([]);
+  const [achReady, setAchReady] = useState<boolean>(false);
 
   const preview = useMutation({
     mutationFn: () => apiRequest(`/api/distributions/runs/${id}/preview`, { method: "POST", body: JSON.stringify({}) }),
-    onSuccess: (resp: any) => {
+    onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/distributions/runs", id] });
-      setWarnings(resp?.preview?.warnings ?? []);
       toast({ title: "Preview computed" });
     },
     onError: (e: any) => toast({ title: "Preview failed", description: e.message, variant: "destructive" }),
@@ -40,8 +42,8 @@ export default function DistributionRunDetail() {
     mutationFn: () => apiRequest(`/api/distributions/runs/${id}/finalize`, { method: "POST" }),
     onSuccess: (resp: any) => {
       queryClient.invalidateQueries({ queryKey: ["/api/distributions/runs", id] });
-      setOwnerAchFile(resp?.ownerAchFile ?? null);
       setFtePayrollRunId(resp?.ftePayrollRunId ?? null);
+      setAchReady(Boolean(resp?.ownerAchAvailable));
       toast({
         title: "Finalized",
         description: resp?.message ?? "Owner ACH file ready; FTE payroll run created in draft.",
@@ -59,20 +61,23 @@ export default function DistributionRunDetail() {
     onError: (e: any) => toast({ title: "Reverse failed", description: e.message, variant: "destructive" }),
   });
 
+  // Stream the owner NACHA file as a download. The server returns
+  // text/plain attachment so the file content never enters a JSON
+  // payload (where plaintext routing/account numbers could leak through
+  // logs, devtools history, or gateway caches).
   function downloadAchFile() {
-    if (!ownerAchFile) return;
-    const blob = new Blob([ownerAchFile], { type: "text/plain" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `distribution-owner-ach-${id}.txt`;
-    a.click();
-    URL.revokeObjectURL(url);
+    window.location.href = `/api/distributions/runs/${id}/owner-ach`;
   }
 
   if (isLoading || !data) return <Layout><div className="p-6">Loading…</div></Layout>;
 
   const r = data.run;
+  // Warnings come from the persisted run record so they survive
+  // refreshes and remain visible after preview → approved → finalized.
+  const warnings: string[] = Array.isArray(r.warnings) ? r.warnings : [];
+  // Owner ACH download is available once the run is finalized (and was
+  // also reported as available by the most recent finalize call).
+  const ownerAchAvailable = r.status === 'finalized' && (achReady || !!r.nachaEffectiveDate);
   const lines = (data.lines ?? []) as any[];
   const ownerLines = lines.filter(l => l.recipientType === 'owner');
   const fteLines = lines.filter(l => l.recipientType === 'fte');
@@ -132,7 +137,7 @@ export default function DistributionRunDetail() {
           </Card>
         )}
 
-        {ownerAchFile && (
+        {ownerAchAvailable && (
           <Card className="border-green-300">
             <CardHeader className="pb-2">
               <CardTitle className="text-sm text-green-800">Owner ACH file ready</CardTitle>
