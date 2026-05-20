@@ -5,8 +5,8 @@
  * for annual filings (W-2 box totals, W-3 transmittal summary, 1099-NEC).
  * These are NOT IRS-filing-ready PDFs — they're accountant-input
  * artifacts. Accountants paste totals into their filing software (Drake,
- * Lacerte, CCH, ProSystem fx); SSA EFW2 / IRS FIRE generation is a
- * separate downstream concern.
+ * Lacerte, CCH, ProSystem fx). For direct e-filing, see
+ * `tax-forms-efile.ts` (SSA EFW2 for W-2/W-3, IRS FIRE for 1099-NEC).
  *
  * All cent inputs are integer cents; dollar formatting happens here.
  */
@@ -53,7 +53,17 @@ export interface TaxTotalsInput {
     taxableWagesCents: number;
     fedIncomeTaxCents: number;
     ssWagesCents: number;
+    // Actual withheld amounts pulled from the run breakdown. ssTaxCents
+    // and medicareTaxCents come from the 'Social Security' / 'Medicare'
+    // lines on each run item; additionalMedicareTaxCents tracks the
+    // 0.9% surcharge applied above the $200K single / $250K MFJ threshold.
+    // Sourcing from the breakdown (instead of recomputing rate × wages)
+    // keeps the totals consistent with what was actually deposited and
+    // handles SS cap behavior + rounding correctly.
+    ssTaxCents: number;
     medicareWagesCents: number;
+    medicareTaxCents: number;
+    additionalMedicareTaxCents: number;
     netPayCents: number;
   }>;
   form1099Recipients: Array<{

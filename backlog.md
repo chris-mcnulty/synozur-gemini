@@ -1,7 +1,64 @@
 # Constellation Product Backlog
 
-**Last Updated**: May 19, 2026
-**Version**: 7.2 — Adds Payroll integration sweep (users ↔ payroll_employees auto-provisioning, time-tracking hours feed, YTD/HoH tax correctness, NACHA disbursement export, employee self-service paystubs, quarterly tax totals, PTO accrual on finalize). Remaining payroll P1 work captured below.
+**Last Updated**: May 20, 2026
+**Version**: 7.3 — Adds Washington state payroll seeds (PFML, Cares, SUTA, L&I stub), SSA EFW2 + IRS FIRE e-file generators, and a quarterly profit-distribution design doc covering owner pools (Michelle + Chris) and FTE bonus pools. Plus open production-readiness questions captured from the May 20 planning conversation.
+
+---
+
+## 🎯 Production Readiness — Top 10 (May 20, 2026)
+
+Drawn from the May 20 planning conversation. Ordered by risk-to-ship.
+
+1. **SSA EFW2 + IRS FIRE e-file** — first cut in `tax-forms-efile.ts` (May 20). Validate against SSA AccuWage + IRS FIRE-test before production. Open: full SSN storage (currently `ssnLast4` only), BSO User ID / TCC capture in tenant settings.
+2. **941 PDF via Puppeteer** — current 941 returns HTML; add `?format=pdf`.
+3. **State withholding matrix — next 10 states** (TX, MA, IL, GA, NC, VA, OH, WA-PFML/Cares ✅, CO, MN, MI). Bracket data only; engine is ready.
+4. **SUTA experience-rate tenant override UI** — engine already accepts tenant-scoped overrides; just needs an admin form.
+5. **Off-cycle / bonus payroll run UX** — `runType='bonus'` exists, picker UI missing. Blocks FTE bonus pool payout (see distribution design §5).
+6. **Per-diem accountable vs non-accountable split** — above-federal-rate spillover must flow to W-2 Box 1.
+7. **HSA / Section 125 health reimbursement** — pre-tax, Box 12 codes.
+8. **Title III garnishment ordering** (federal tax → child support → student loans → consumer → state).
+9. **QuickBooks Online integration** — #1 user-feedback request, Q2 priority.
+10. **Codebase modularization** (`routes.ts` → 13 domain modules, `storage.ts` → 8). Easier to land before tax-forms work piles up.
+
+Two items the conversation explicitly *did not* put in the top 10 but
+need decisions soon:
+
+- **Constellation ↔ Gemini app split**: the home/welcome screen still
+  says Constellation and the nav still surfaces project-only features
+  (time tracking, estimates) inside what's becoming a payroll product.
+  Decision required: keep two surfaces, or refold payroll back into
+  Constellation alongside the existing expense / contractor-invoice /
+  exchange-rate modules. Tracked as a P0 product decision below.
+- **Inbound 1099 receipts (we receive a 1099 from a client)**: ruled
+  out of Constellation in the May 20 conversation. Belongs in QBO sync
+  (#9 above), not here.
+
+---
+
+## 🚦 P0 — Product Decision: Constellation vs. Gemini App Split
+
+**Status:** Needs decision (May 20, 2026)
+**Effort:** Medium (1-2 weeks regardless of direction)
+
+The payroll module shipped as "Gemini Payroll" but inherited every
+Constellation nav and the same splash/home screen. That's inconsistent
+and confusing for anyone arriving at payroll without a project context.
+
+Two paths, pick one before the next nav/branding pass:
+
+- **(A) Refold into Constellation.** Drop the "Gemini" sub-brand; surface
+  payroll as a top-level Constellation module alongside Expenses,
+  Contractor Invoices, and Exchange Rates (all of which already live in
+  Constellation). Pro: one product, one nav, one home screen, shared
+  user/tenant model. Con: payroll-only customers (if any) see a busier
+  product.
+- **(B) Keep separate.** Build a real Gemini splash/home + chromeless
+  payroll-only nav. Pro: payroll customers see a focused product. Con:
+  duplicate user management, duplicate tenant pages, more code to keep
+  consistent. The current state already shows the cost of this path
+  (Constellation branding leaking into Gemini surfaces).
+
+Open question, not yet answered.
 
 ---
 
@@ -35,9 +92,13 @@ The current sweep closes the highest-impact gaps; remaining items below.
 - [x] Form 941 + Schedule B printable HTML; W-2 / W-3 / 1099-NEC CSVs (artifact-only, not e-file)
 
 **Remaining P1 (in priority order):**
-- [ ] **State withholding matrix beyond CA/NY/NJ/PA** — bracket tables for the next ~10 states by headcount (TX has no state income tax; covers MA, IL, GA, NC, VA, OH, WA-PFML, CO, MN, MI). Existing engine `kind: 'brackets'` is ready; just need data.
-- [ ] **State-specific SUTA experience rates** — platform seeds the new-employer rate per state; tenants need a UI to override with the experience-rated percentage their state assigned.
-- [ ] **SSA EFW2 + IRS FIRE e-file** — current artifacts are CSV/HTML for accountant input. Generate the actual SSA EFW2 fixed-width W-2 file and the IRS FIRE 1099 file for direct e-filing.
+- [ ] **State withholding matrix beyond CA/NY/NJ/PA/WA** — bracket tables for the next ~10 states by headcount (TX has no state income tax; covers MA, IL, GA, NC, VA, OH, CO, MN, MI). Existing engine `kind: 'brackets'` is ready; just need data. WA seeded in 0023 (PFML + Cares as `wage_premium`).
+- [ ] **State-specific SUTA experience rates** — platform seeds the new-employer rate per state; tenants need a UI to override with the experience-rated percentage their state assigned. SUTA-WA seeded in 0023.
+- [x] **SSA EFW2 + IRS FIRE e-file (first cut)** — fixed-width file generators in `server/services/tax-forms-efile.ts`; routes `POST /api/payroll/tax-forms/w2-efw2` and `POST /api/payroll/tax-forms/1099-nec-fire`. **Validate against SSA AccuWage and IRS FIRE-test before production filing.** Open follow-ups:
+  - Full SSN storage (today only `ssnLast4` lives on payroll_employees — EFW2 needs full SSN, must come from a PII vault).
+  - Tenant settings: BSO User ID, IRS TCC, software vendor code (currently passed in request body).
+  - 1099-DIV variant for owner distributions if the entity elects C-corp.
+- [ ] **Washington state coverage** — PFML, Cares, SUTA-WA, L&I stub seeded in migration 0023. Remaining: WA L&I hours-based premium engine (needs `risk_class_code` on payroll_employees + per-class rate table); WA B&O accrual on the AR side (see `docs/design/quarterly-profit-distribution.md` §7).
 - [ ] **941 PDF via Puppeteer** — current 941 endpoint returns printable HTML. Add a `?format=pdf` variant rendered via the existing puppeteer pipeline (already used by invoicing).
 - [ ] **Off-cycle / bonus run UX** — schema and runType `'bonus'` are in place but the create-run flow doesn't let admins pick a subset of employees yet.
 - [ ] **Per-period accruals other than PTO** — sick leave, parental leave, jury duty caps.
@@ -363,6 +424,36 @@ Estimate approval/status transitions, invoice generation, line-item-level edits 
 - [x] Share management UI: grant, revoke, view current shares
 - [x] Shared viewer sees estimate detail, line items, totals, and Gantt — but not cost rates or margin data
 - [x] Read-only banner shown to shared viewers on estimate detail page
+
+### Quarterly Profit Distribution (Owners + FTE Bonus Pool)
+**Status:** Backend shipped May 20, 2026; UI pending. Design: `docs/design/quarterly-profit-distribution.md`
+**Effort:** UI remaining (~1 week)
+
+Synozur owners (Michelle, Chris) now have an in-product mechanism for
+quarterly distributions plus an FTE profit-sharing pool. Backend covers
+the entire run lifecycle (draft → previewed → approved → finalized →
+reversed); UI surface is the only remaining gap.
+
+- [x] Schema: `entity_owners`, `distribution_policy`, `distribution_runs`, `distribution_lines` (migration 0024)
+- [x] `is_owner` flag on `payroll_employees` so owner-employees don't double-dip in FTE pool
+- [x] Available-funds engine (cash-basis: revenue collected − non-reimbursable opex − payroll burden − tax reserve − operating reserve − WA B&O accrual)
+- [x] Owner pool allocation by ownership percent (with penny-drift sweep into largest share)
+- [x] FTE pool allocation by normalized salary/tenure/performance/hours weights (defaults: 60/10/20/10)
+- [x] FSM: draft → previewed → approved → finalized → reversed (mirrors payroll runs)
+- [x] Owner non-payroll NACHA file (reuses `buildNachaFile` with the tenant's existing ACH originator profile, separate from the payroll NACHA file)
+- [x] FTE payout creates a draft supplemental payroll run (`runType: 'bonus'`), bonusCents per line — admin previews/finalizes through the existing payroll page
+- [x] WA B&O accrual line in available-funds calc (configurable `wa_bo_rate_pct`)
+- [x] Full REST API: `/api/distributions/owners`, `/policy`, `/runs`, `/runs/:id/{preview,approve,finalize,reverse}`
+- [ ] Admin UI page `/distributions` mirroring `/payroll/runs`
+- [ ] Performance review row per employee per quarter (today defaults to 3/5 mid)
+- [ ] Owners' bank account capture UI (today the field exists but no form)
+- [ ] Distribution-policy edit UI (today only via PATCH `/api/distributions/policy`)
+- [ ] Open questions for owners (still): entity tax election, reserve percentages, FTE weighting, payout cadence, fixed-date vs approve-then-pay (see design §9)
+
+### Inbound 1099 Receipts (We Receive a 1099 from a Client) — RULED OUT
+**Status:** Out of scope for Constellation (May 20, 2026 decision)
+**Rationale:** Bookkeeping/GL territory. Belongs in the QuickBooks Online
+integration, not here. AR is already tracked via invoices/payments.
 
 ### QuickBooks Online Integration
 **Status:** Planned — #1 user-requested feature (94 marketplace coins, Feb 2026 feedback)
