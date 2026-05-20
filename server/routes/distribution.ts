@@ -25,7 +25,7 @@ import {
 import {
   buildNachaFile, validateRouting, type NachaEntry, type NachaOriginator,
 } from "../services/nacha";
-import { decryptString } from "../services/crypto";
+import { decryptString, encryptString } from "../services/crypto";
 import { db } from "../db";
 import { eq, and, sql } from "drizzle-orm";
 import {
@@ -58,18 +58,46 @@ export function registerDistributionRoutes(app: Express, deps: Deps) {
     } catch (e: any) { res.status(500).json({ message: e.message }); }
   });
 
+  // Owner create/update: the client sends plaintext `bankAccountNumber`
+  // and we encrypt it server-side into `bankAccountNumberEnc` — plaintext
+  // never touches storage. This mirrors the pattern in
+  // /api/payroll/employees so the encryption boundary is consistent.
+  // tenantId is set from the session, never the body.
+  const ownerBodySchema = insertEntityOwnerSchema
+    .omit({ tenantId: true, bankAccountNumberEnc: true })
+    .extend({ bankAccountNumber: z.string().optional() });
+
+  function encryptOwnerBank<T extends { bankAccountNumber?: string }>(
+    body: T,
+  ): Omit<T, 'bankAccountNumber'> & { bankAccountNumberEnc?: string } {
+    const { bankAccountNumber, ...rest } = body;
+    const out: any = { ...rest };
+    if (bankAccountNumber !== undefined && bankAccountNumber !== '') {
+      const enc = encryptString(bankAccountNumber);
+      if (!enc) {
+        throw new Error('PAYROLL_ENCRYPTION_KEY is unset; cannot encrypt owner bank account.');
+      }
+      out.bankAccountNumberEnc = enc;
+    }
+    return out;
+  }
+
   app.post('/api/distributions/owners', requireAuth, PM, async (req, res) => {
     try {
-      const data = insertEntityOwnerSchema.parse({ ...req.body, tenantId: tenantOf(req) });
-      res.json(await distributionStorage.createOwner(data));
+      const parsed = ownerBodySchema.parse(req.body);
+      const data = { ...encryptOwnerBank(parsed), tenantId: tenantOf(req) };
+      res.json(await distributionStorage.createOwner(data as any));
     } catch (e: any) { res.status(400).json({ message: e.message }); }
   });
 
   app.patch('/api/distributions/owners/:id', requireAuth, PM, async (req, res) => {
     try {
       const tenantId = tenantOf(req);
-      const data = insertEntityOwnerSchema.partial().parse(req.body);
-      res.json(await distributionStorage.updateOwner(tenantId, req.params.id, data));
+      // PATCH explicitly forbids tenantId in the body; updates are scoped
+      // by the session tenant + path id.
+      const parsed = ownerBodySchema.partial().parse(req.body);
+      const data = encryptOwnerBank(parsed);
+      res.json(await distributionStorage.updateOwner(tenantId, req.params.id, data as any));
     } catch (e: any) { res.status(400).json({ message: e.message }); }
   });
 
@@ -117,22 +145,31 @@ export function registerDistributionRoutes(app: Express, deps: Deps) {
     } catch (e: any) { res.status(500).json({ message: e.message }); }
   });
 
-  // Create a draft run for a quarter (idempotent — returns existing draft).
+  // Create a draft run for a quarter. Truly idempotent for drafts: a
+  // repeated POST returns the existing draft as 200 (so the UI can navigate
+  // straight to it). Once a run has advanced to previewed/approved/finalized
+  // the endpoint hard-rejects with 409 — those states represent owner-
+  // visible state, so silently returning them would mask a workflow error.
+  // Reversed runs do not block; a corrected run can be created after one.
   app.post('/api/distributions/runs', requireAuth, PM, async (req, res) => {
     try {
       const tenantId = tenantOf(req);
       const body = z.object({ quarterLabel: z.string().regex(/^\d{4}-Q[1-4]$/) }).parse(req.body);
       const bounds = quarterBounds(body.quarterLabel);
-      // Reject if a non-reversed run already exists for this quarter.
       const existing = await db.select().from(distributionRuns).where(and(
         eq(distributionRuns.tenantId, tenantId),
         eq(distributionRuns.quarterLabel, body.quarterLabel),
       ));
       const live = existing.find(r => r.status !== 'reversed');
-      if (live) return res.status(409).json({
-        message: `A ${live.status} run already exists for ${body.quarterLabel}.`,
-        runId: live.id,
-      });
+      if (live?.status === 'draft') {
+        return res.json(live);
+      }
+      if (live) {
+        return res.status(409).json({
+          message: `A ${live.status} run already exists for ${body.quarterLabel}. Reverse it first if you need to create a new one.`,
+          runId: live.id,
+        });
+      }
       const userId = (req.user as any)?.id ?? null;
       const run = await distributionStorage.createRun({
         tenantId,
@@ -215,7 +252,25 @@ export function registerDistributionRoutes(app: Express, deps: Deps) {
   });
 
   // Finalize: emits owner ACH file + creates supplemental payroll run for FTEs.
-  // Returns the NACHA file body and the payroll run id.
+  //
+  // Two-phase shape so partial failures don't strand state:
+  //   Phase 1 (no writes): load lines, validate bank/employee data, decrypt
+  //                        owner accounts, build the NACHA file body.
+  //   Phase 2 (db.transaction): insert payroll_run + payroll_run_items,
+  //                              stamp owner lines 'issued' + ACH trace,
+  //                              link FTE lines to payroll items (status
+  //                              stays 'pending' until the bonus payroll
+  //                              run actually finalizes), update the
+  //                              distribution run to 'finalized'.
+  // If anything in phase 1 fails we 4xx without writes. If anything in
+  // phase 2 fails the transaction rolls back atomically.
+  //
+  // Status semantics for distribution_lines:
+  //   pending   — preview created the line, no money has moved
+  //   issued    — owner: NACHA file emitted, bank settlement not confirmed
+  //   paid      — bank ACK received (owner) or downstream payroll run
+  //               finalized (FTE)
+  //   reversed  — manually unwound
   app.post('/api/distributions/runs/:id/finalize', requireAuth, PM, async (req, res) => {
     try {
       const tenantId = tenantOf(req);
@@ -226,9 +281,12 @@ export function registerDistributionRoutes(app: Express, deps: Deps) {
       }
       const lines = await distributionStorage.listLines(tenantId, run.id);
 
-      // ---- Owner pool: build the non-payroll NACHA file ----------------
+      // ---- Phase 1: validate + build the NACHA file -----------------------
       const ownerLines = lines.filter(l => l.recipientType === 'owner' && l.amountCents > 0);
+      const fteLines = lines.filter(l => l.recipientType === 'fte' && l.amountCents > 0);
+
       let ownerAchFile: string | null = null;
+      let ownerAchTrace = '';
       if (ownerLines.length > 0) {
         const ach = await payrollStorage.getAchOriginator(tenantId);
         if (!ach) {
@@ -236,7 +294,6 @@ export function registerDistributionRoutes(app: Express, deps: Deps) {
             message: 'No ACH originator profile on file. Configure under Payroll Settings before finalizing owner distributions.',
           });
         }
-        // Resolve bank details from entity_owners (separate from payroll bank).
         const owners = await distributionStorage.listOwners(tenantId);
         const ownerByUser = new Map(owners.map(o => [o.userId, o]));
         const entries: NachaEntry[] = [];
@@ -286,75 +343,76 @@ export function registerDistributionRoutes(app: Express, deps: Deps) {
           immediateDestinationName: ach.immediateDestinationName,
           immediateDestination: ach.immediateDestination,
         };
-        // Effective date YYMMDD = today (caller can re-emit with a future date if needed).
         const today = new Date();
         const yymmdd = `${String(today.getUTCFullYear() % 100).padStart(2, '0')}${String(today.getUTCMonth() + 1).padStart(2, '0')}${String(today.getUTCDate()).padStart(2, '0')}`;
         ownerAchFile = buildNachaFile(originator, entries, yymmdd).content;
-        // Stamp lines paid (trace numbers would come from the bank's
-        // ACK file; for now we record an internal marker).
-        for (const l of ownerLines) {
-          await distributionStorage.markLinePaid(tenantId, l.id, {
-            achTraceNumber: `DIST-${run.id.slice(0, 8)}`,
-          });
-        }
+        ownerAchTrace = `DIST-${run.id.slice(0, 8)}`;
       }
 
-      // ---- FTE pool: create a supplemental payroll run ------------------
-      const fteLines = lines.filter(l => l.recipientType === 'fte' && l.amountCents > 0);
-      let ftePayrollRunId: string | null = null;
+      // FTE: validate every line has a payroll_employee before we open the tx.
+      const emps = await payrollStorage.listEmployees(tenantId, false);
+      const empByUser = new Map(emps.filter(e => e.userId).map(e => [e.userId!, e]));
       if (fteLines.length > 0) {
-        // Map user_id → payroll_employee.id so the payroll run items link.
-        const userIds = fteLines.map(l => l.recipientUserId);
-        const emps = await payrollStorage.listEmployees(tenantId, false);
-        const empByUser = new Map(emps.filter(e => e.userId).map(e => [e.userId!, e]));
-        const missing = userIds.filter(u => !empByUser.has(u));
-        if (missing.length > 0) {
+        const missingFte = fteLines
+          .filter(l => !empByUser.has(l.recipientUserId))
+          .map(l => l.recipient?.name ?? l.recipientUserId);
+        if (missingFte.length > 0) {
           return res.status(400).json({
-            message: `FTE lines reference users without payroll employee records: ${missing.join(', ')}`,
+            message: `FTE lines reference users without payroll employee records: ${missingFte.join(', ')}`,
           });
         }
-        const userId = (req.user as any)?.id ?? null;
-        // Create the supplemental run. periodStart/end mirror the distribution
-        // run's quarter; pay date defaults to today (admin can adjust).
-        const today = new Date().toISOString().slice(0, 10);
-        const [newRun] = await db.insert(payrollRuns).values({
-          tenantId,
-          periodStart: run.periodStart,
-          periodEnd: run.periodEnd,
-          payDate: today,
-          runType: 'bonus',
-          status: 'draft',
-          createdBy: userId,
-          notes: `FTE profit-sharing pool from distribution run ${run.id} (${run.quarterLabel}).`,
-        }).returning();
-        for (const l of fteLines) {
-          const emp = empByUser.get(l.recipientUserId)!;
-          const [item] = await db.insert(payrollRunItems).values({
-            tenantId,
-            runId: newRun.id,
-            employeeId: emp.id,
-            bonusCents: l.amountCents,
-          }).returning();
-          await distributionStorage.markLinePaid(tenantId, l.id, {
-            payrollRunItemId: item.id,
-          });
-        }
-        ftePayrollRunId = newRun.id;
       }
 
-      const updated = await distributionStorage.updateRun(tenantId, run.id, {
-        status: 'finalized',
-        finalizedAt: new Date(),
-        ftePayrollRunId: ftePayrollRunId ?? undefined,
+      // ---- Phase 2: single transaction for all writes ---------------------
+      const userId = (req.user as any)?.id ?? null;
+      const todayDate = new Date().toISOString().slice(0, 10);
+      const { updatedRun, ftePayrollRunId } = await db.transaction(async (tx) => {
+        let ftePayrollRunId: string | null = null;
+        if (fteLines.length > 0) {
+          const [newRun] = await tx.insert(payrollRuns).values({
+            tenantId,
+            periodStart: run.periodStart,
+            periodEnd: run.periodEnd,
+            payDate: todayDate,
+            runType: 'bonus',
+            status: 'draft',
+            createdBy: userId,
+            notes: `FTE profit-sharing pool from distribution run ${run.id} (${run.quarterLabel}).`,
+          }).returning();
+          for (const l of fteLines) {
+            const emp = empByUser.get(l.recipientUserId)!;
+            const [item] = await tx.insert(payrollRunItems).values({
+              tenantId,
+              runId: newRun.id,
+              employeeId: emp.id,
+              bonusCents: l.amountCents,
+            }).returning();
+            // status stays 'pending'; downstream payroll finalize flips to 'paid'.
+            await distributionStorage.linkFteLine(tx, tenantId, l.id, item.id);
+          }
+          ftePayrollRunId = newRun.id;
+        }
+        for (const l of ownerLines) {
+          await distributionStorage.markOwnerLineIssued(tx, tenantId, l.id, ownerAchTrace);
+        }
+        const [updatedRun] = await tx.update(distributionRuns)
+          .set({
+            status: 'finalized',
+            finalizedAt: new Date(),
+            ftePayrollRunId: ftePayrollRunId ?? undefined,
+          })
+          .where(and(eq(distributionRuns.tenantId, tenantId), eq(distributionRuns.id, run.id)))
+          .returning();
+        return { updatedRun, ftePayrollRunId };
       });
 
       res.json({
-        run: updated,
+        run: updatedRun,
         ownerAchFile,
         ftePayrollRunId,
         message: ftePayrollRunId
-          ? 'Owner ACH file emitted; FTE bonus payroll run created in draft — preview and finalize it from /payroll/runs to actually disburse the bonuses.'
-          : 'Owner ACH file emitted. No FTE bonus pool this quarter.',
+          ? 'Owner ACH file emitted (lines status=issued); FTE bonus payroll run created in draft — preview and finalize it from /payroll/runs to disburse and flip FTE lines to paid.'
+          : 'Owner ACH file emitted (lines status=issued). No FTE bonus pool this quarter.',
       });
     } catch (e: any) {
       // eslint-disable-next-line no-console

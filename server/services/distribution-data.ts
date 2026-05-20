@@ -116,14 +116,48 @@ export async function fetchFteCandidates(
   ));
   if (employees.length === 0) return [];
 
-  const candidates: FtePoolCandidate[] = [];
-  for (const emp of employees) {
-    const comp = await db.select().from(payrollCompensation).where(and(
-      eq(payrollCompensation.tenantId, tenantId),
-      eq(payrollCompensation.employeeId, emp.id),
-      lte(payrollCompensation.effectiveFrom, periodEnd),
-    )).orderBy(sql`effective_from desc`).limit(1);
-    const c = comp[0];
+  const empIds = employees.map(e => e.id);
+  const userIds = employees.map(e => e.userId).filter((u): u is string => !!u);
+
+  // One query for effective compensation: latest row per employee whose
+  // effective_from is on or before periodEnd. DISTINCT ON gives us O(1)
+  // rows per employee, ordered by effective_from desc.
+  const compRows = await db.execute(sql`
+    SELECT DISTINCT ON (employee_id)
+      employee_id, comp_type, amount_cents, hours_per_week
+    FROM payroll_compensation
+    WHERE tenant_id = ${tenantId}
+      AND employee_id IN (${sql.join(empIds.map(id => sql`${id}`), sql`, `)})
+      AND effective_from <= ${periodEnd}::date
+    ORDER BY employee_id, effective_from DESC
+  `);
+  const compByEmp = new Map<string, { compType: string; amountCents: number; hoursPerWeek: string | null }>();
+  for (const r of compRows.rows as any[]) {
+    compByEmp.set(r.employee_id, {
+      compType: r.comp_type,
+      amountCents: Number(r.amount_cents),
+      hoursPerWeek: r.hours_per_week,
+    });
+  }
+
+  // One query for hours across the quarter, grouped by personId.
+  const hoursByUser = new Map<string, number>();
+  if (userIds.length > 0) {
+    const hoursRows = await db.execute(sql`
+      SELECT person_id, COALESCE(SUM(hours), 0)::numeric AS total_hours
+      FROM time_entries
+      WHERE person_id IN (${sql.join(userIds.map(id => sql`${id}`), sql`, `)})
+        AND date >= (${periodEnd}::date - interval '3 months')
+        AND date <= ${periodEnd}::date
+      GROUP BY person_id
+    `);
+    for (const r of hoursRows.rows as any[]) {
+      hoursByUser.set(r.person_id, Number(r.total_hours ?? 0));
+    }
+  }
+
+  return employees.map(emp => {
+    const c = compByEmp.get(emp.id);
     // Annualize hourly comp so an hourly worker isn't penalized in the
     // salary-weighted score.
     const baseSalaryCents = c
@@ -131,33 +165,19 @@ export async function fetchFteCandidates(
           ? Math.round(c.amountCents * Number(c.hoursPerWeek ?? 40) * 52)
           : c.amountCents)
       : 0;
-
     const tenureMonths = emp.hireDate
       ? Math.max(0, Math.round(
           (new Date(periodEnd).getTime() - new Date(emp.hireDate).getTime())
           / (1000 * 60 * 60 * 24 * 30.4375),
         ))
       : 0;
-
-    let hours = 0;
-    if (emp.userId) {
-      const hoursRows = await db.select({
-        hours: timeEntries.hours,
-      }).from(timeEntries).where(and(
-        eq(timeEntries.personId, emp.userId),
-        gte(timeEntries.date, sql`(${periodEnd}::date - interval '3 months')`),
-        lte(timeEntries.date, periodEnd),
-      ));
-      hours = hoursRows.reduce((s, r) => s + Number(r.hours ?? 0), 0);
-    }
-
-    candidates.push({
+    const hours = emp.userId ? (hoursByUser.get(emp.userId) ?? 0) : 0;
+    return {
       employee: emp, baseSalaryCents, tenureMonths,
       performanceScore: 3, // default until per-quarter reviews land
       hours,
-    });
-  }
-  return candidates;
+    };
+  });
 }
 
 export async function fetchActiveOwners(tenantId: string): Promise<EntityOwner[]> {

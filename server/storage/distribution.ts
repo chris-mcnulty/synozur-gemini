@@ -6,6 +6,12 @@
 
 import { db } from "../db";
 import { and, eq, desc, sql, inArray } from "drizzle-orm";
+
+// Drizzle's `tx` argument inside `db.transaction((tx) => ...)` is a
+// PgTransaction, not the base NeonDatabase, but both expose the same
+// update/insert/delete shape. We extract the callback param type so
+// helpers can be called from inside or outside a transaction.
+type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
 import {
   entityOwners, distributionPolicy, distributionRuns, distributionLines,
   users,
@@ -123,23 +129,45 @@ export const distributionStorage = {
     runId: string,
     newLines: Omit<InsertDistributionLine, 'tenantId' | 'runId'>[],
   ): Promise<void> {
-    // A preview rerun rewrites the line set entirely. Once status moves to
-    // 'finalized', the caller should reject any further replace.
-    await db.delete(distributionLines)
-      .where(and(eq(distributionLines.tenantId, tenantId), eq(distributionLines.runId, runId)));
-    if (newLines.length === 0) return;
-    await db.insert(distributionLines).values(
-      newLines.map(l => ({ ...l, tenantId, runId })),
-    );
+    // Atomic delete + insert. A preview rerun rewrites the line set
+    // entirely; wrapping the pair in a transaction prevents a crash mid-
+    // replace from leaving the run with zero lines.
+    await db.transaction(async (tx) => {
+      await tx.delete(distributionLines)
+        .where(and(eq(distributionLines.tenantId, tenantId), eq(distributionLines.runId, runId)));
+      if (newLines.length > 0) {
+        await tx.insert(distributionLines).values(
+          newLines.map(l => ({ ...l, tenantId, runId })),
+        );
+      }
+    });
   },
 
-  async markLinePaid(
+  /** Owner line moved to 'issued' once the NACHA file is emitted. Bank
+   *  ACK or a manual confirm action flips it to 'paid' later — until then,
+   *  the system has only generated a file, not settled money. */
+  async markOwnerLineIssued(
+    tx: Tx,
     tenantId: string,
     lineId: string,
-    payload: { payrollRunItemId?: string; achTraceNumber?: string },
+    achTraceNumber: string,
   ): Promise<void> {
-    await db.update(distributionLines)
-      .set({ status: 'paid', ...payload })
+    await tx.update(distributionLines)
+      .set({ status: 'issued', achTraceNumber })
+      .where(and(eq(distributionLines.tenantId, tenantId), eq(distributionLines.id, lineId)));
+  },
+
+  /** FTE line links to its draft bonus payroll_run_item but stays
+   *  'pending'. The downstream payroll run finalize is responsible for
+   *  flipping the status to 'paid' once the bonus is actually disbursed. */
+  async linkFteLine(
+    tx: Tx,
+    tenantId: string,
+    lineId: string,
+    payrollRunItemId: string,
+  ): Promise<void> {
+    await tx.update(distributionLines)
+      .set({ payrollRunItemId })
       .where(and(eq(distributionLines.tenantId, tenantId), eq(distributionLines.id, lineId)));
   },
 };

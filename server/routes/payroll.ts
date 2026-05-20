@@ -639,12 +639,24 @@ export function registerPayrollRoutes(app: Express, deps: PayrollRouteDeps) {
       );
       const employees = await payrollStorage.listEmployees(tenantId, true);
       const empById = new Map(employees.map(e => [e.id, e]));
+      // Resolve full SSN for each W-2 employee. The schema only stores
+      // last-4 today; production filing must source the full SSN from a
+      // PII vault. The route accepts a `fullSsns` map keyed by employeeId
+      // so the caller can wire that source in without changing the schema.
+      // No full SSN → hard-fail; we will never synthesize one.
+      const fullSsns: Record<string, string> = (req.body?.fullSsns ?? {}) as any;
+      const missing: string[] = [];
       const efw2Employees: Efw2Employee[] = totals.w2Employees
-        .map((t: any) => {
+        .map((t: any): Efw2Employee | null => {
           const emp = empById.get(t.employeeId);
-          if (!emp || !emp.ssnLast4) return null; // EFW2 requires a full SSN
+          if (!emp) return null;
+          const ssn = String(fullSsns[t.employeeId] ?? '').replace(/\D/g, '');
+          if (!/^\d{9}$/.test(ssn)) {
+            missing.push(`${emp.firstName} ${emp.lastName}`);
+            return null;
+          }
           return {
-            ssn: emp.ssnLast4.padStart(9, '0'), // stubbed: real full SSN must come from PII vault
+            ssn,
             firstName: emp.firstName,
             lastName: emp.lastName,
             addressLine1: emp.homeAddress ?? '',
@@ -657,12 +669,21 @@ export function registerPayrollRoutes(app: Express, deps: PayrollRouteDeps) {
             ssTaxCents: Math.round(t.ssWagesCents * 0.062),
             medicareWagesCents: t.medicareWagesCents,
             medicareTaxCents: Math.round(t.medicareWagesCents * 0.0145),
-          } as Efw2Employee;
+          };
         })
         .filter((e: Efw2Employee | null): e is Efw2Employee => e !== null);
+      if (missing.length > 0) {
+        return res.status(400).json({
+          message:
+            `Missing full 9-digit SSN for ${missing.length} W-2 employee(s): ${missing.join(', ')}. ` +
+            `Supply them via the request body { fullSsns: { [employeeId]: "123456789" } }. ` +
+            `EFW2 will not synthesize SSNs from stored last-4 values.`,
+          missingEmployees: missing,
+        });
+      }
       if (efw2Employees.length === 0) {
         return res.status(400).json({
-          message: 'No W-2 employees with full SSN on file for the year.',
+          message: 'No W-2 employees in scope for the requested year.',
         });
       }
       // Default employer info from the ACH originator profile if not supplied.
@@ -731,15 +752,30 @@ export function registerPayrollRoutes(app: Express, deps: PayrollRouteDeps) {
       );
       const employees = await payrollStorage.listEmployees(tenantId, true);
       const empById = new Map(employees.map(e => [e.id, e]));
+      // Full TIN per contractor must come from their W-9 — the route
+      // accepts a `tins` map keyed by employeeId so the caller wires in
+      // whatever source of record holds the W-9 data. tinType: 1 = EIN,
+      // 2 = SSN, 3 = unknown (don't use). Refuse to synthesize a TIN
+      // from stored last-4; IRS FIRE rejects mismatches and penalties run
+      // $310/return.
+      const tins: Record<string, { tin: string; tinType: 1 | 2 | 3 }> =
+        (req.body?.tins ?? {}) as any;
+      const missing: string[] = [];
       const payees: FirePayee[] = totals.form1099Recipients
-        .map((r: any) => {
+        .map((r: any): FirePayee | null => {
           const emp = empById.get(r.employeeId);
           if (!emp) return null;
           // 1099 thresholds: skip recipients under $600 NEC for the year.
           if (r.grossCents < 60000) return null;
+          const supplied = tins[r.employeeId];
+          const tin = String(supplied?.tin ?? '').replace(/\D/g, '');
+          if (!/^\d{9}$/.test(tin) || !supplied?.tinType || supplied.tinType === 3) {
+            missing.push(`${emp.firstName} ${emp.lastName}`);
+            return null;
+          }
           return {
-            tin: (emp.ssnLast4 ?? '').padStart(9, '0'), // stub — real TIN from contractor W-9
-            tinType: 2 as const, // SSN; flip to 1 for EIN-based contractors
+            tin,
+            tinType: supplied.tinType,
             name: `${emp.firstName} ${emp.lastName}`,
             addressLine1: emp.homeAddress ?? '',
             city: emp.homeCity ?? '',
@@ -747,9 +783,18 @@ export function registerPayrollRoutes(app: Express, deps: PayrollRouteDeps) {
             zip: emp.homeZip ?? '',
             necCents: r.grossCents,
             fedTaxWithheldCents: 0, // backup withholding not modeled yet
-          } as FirePayee;
+          };
         })
         .filter((p: FirePayee | null): p is FirePayee => p !== null);
+      if (missing.length > 0) {
+        return res.status(400).json({
+          message:
+            `Missing W-9 TIN for ${missing.length} contractor(s) above the $600 threshold: ${missing.join(', ')}. ` +
+            `Supply them via { tins: { [employeeId]: { tin: "123456789", tinType: 1|2 } } }. ` +
+            `FIRE will not synthesize TINs from stored last-4 values.`,
+          missingContractors: missing,
+        });
+      }
       if (payees.length === 0) {
         return res.status(400).json({
           message: 'No 1099-NEC recipients above the $600 reporting threshold.',

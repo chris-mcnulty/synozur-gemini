@@ -45,11 +45,26 @@ function fNum(value: number | string | null | undefined, width: number): string 
 /** Money amount: integer cents, zero-padded to width. Pure cents, no decimal. */
 const fMoney = (cents: number | null | undefined, width: number) => fNum(cents ?? 0, width);
 
-/** Strip non-digits and zero-pad. Use for SSN, EIN, ZIP, phone. */
+/** Strip non-digits and zero-pad on the left for ID-style fields (SSN, EIN,
+ *  ZIP, phone). SSA EFW2 and IRS FIRE require these as fixed-width digit
+ *  strings, NOT space-padded — a phone or ZIP padded with spaces will fail
+ *  AccuWage / FIRE validators. If the cleaned value is empty, returns an
+ *  all-zero field of the requested width (still spec-compliant; absent ZIP
+ *  Ext, for example, is "0000"). */
 function fDigits(value: string | null | undefined, width: number): string {
   const d = String(value ?? '').replace(/\D/g, '');
   if (d.length >= width) return d.slice(0, width);
-  return d + ' '.repeat(width - d.length); // ID fields right-pad with spaces if absent (per spec)
+  return '0'.repeat(width - d.length) + d;
+}
+
+/** Optional-digit field: zero-pad when present, all spaces when truly
+ *  absent. Use for fields like contact email or company-name-extension
+ *  where a missing value should be blank rather than zero. */
+function fOptDigits(value: string | null | undefined, width: number): string {
+  const d = String(value ?? '').replace(/\D/g, '');
+  if (d.length === 0) return ' '.repeat(width);
+  if (d.length >= width) return d.slice(0, width);
+  return '0'.repeat(width - d.length) + d;
 }
 
 /** Pad a single line out to `width` if shorter; truncate if longer. */
@@ -272,6 +287,18 @@ export function buildEfw2File(input: Efw2FileInput): string {
   }
   if (input.employees.length === 0) {
     throw new Error('EFW2: at least one employee record is required.');
+  }
+  // Per-employee SSN validation: must be a full 9-digit SSN. Refuse to
+  // synthesize from a last-4 stub — a synthesized SSN would generate an
+  // SSA-rejected file at best and a mis-filed return at worst.
+  for (const e of input.employees) {
+    const ssn = String(e.ssn ?? '').replace(/\D/g, '');
+    if (!/^\d{9}$/.test(ssn)) {
+      throw new Error(
+        `EFW2: full 9-digit SSN required for ${e.firstName} ${e.lastName}. Got ${ssn.length} digit(s). ` +
+        `Refusing to synthesize; supply the full SSN from your PII source before filing.`,
+      );
+    }
   }
   const records: string[] = [];
   records.push(buildRa(input.submitter, input.taxYear, input.resubmitTLCN));
@@ -519,6 +546,18 @@ export function buildFire1099NecFile(input: Fire1099NecFileInput): string {
   }
   if (input.payees.length === 0) {
     throw new Error('FIRE: at least one payee record is required.');
+  }
+  // Per-payee TIN validation: SSN or EIN must be a full 9 digits. Refuse to
+  // synthesize from a last-4 stub — IRS FIRE rejects mismatched names/TINs
+  // and back-payable penalties run $310/return.
+  for (const p of input.payees) {
+    const tin = String(p.tin ?? '').replace(/\D/g, '');
+    if (!/^\d{9}$/.test(tin)) {
+      throw new Error(
+        `FIRE: full 9-digit TIN required for ${p.name}. Got ${tin.length} digit(s). ` +
+        `Collect the contractor's W-9 (SSN or EIN) before generating the 1099-NEC file.`,
+      );
+    }
   }
   let seq = 1;
   const records: string[] = [];
