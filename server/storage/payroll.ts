@@ -411,6 +411,55 @@ export const payrollStorage = {
     return row;
   },
 
+  /**
+   * Tenant override for a single tax code. When a row already exists for
+   * (tenantId, code) we update its rule/name/level in place; otherwise we
+   * insert a fresh tenant-scoped row. The platform default (tenant_id IS
+   * NULL) stays untouched so a tenant can roll back to default by deleting
+   * their override. Required for SUTA experience-rate overrides per state.
+   */
+  async upsertTenantJurisdiction(data: InsertPayrollTaxJurisdiction): Promise<PayrollTaxJurisdiction> {
+    if (!data.tenantId) {
+      throw new Error('upsertTenantJurisdiction requires a tenantId — platform rows are seed-only.');
+    }
+    const [existing] = await db.select().from(payrollTaxJurisdictions)
+      .where(and(
+        eq(payrollTaxJurisdictions.tenantId, data.tenantId),
+        eq(payrollTaxJurisdictions.code, data.code),
+      ));
+    if (existing) {
+      const [updated] = await db.update(payrollTaxJurisdictions)
+        .set({
+          name: data.name,
+          level: data.level,
+          rule: data.rule,
+          isActive: data.isActive ?? true,
+        })
+        .where(eq(payrollTaxJurisdictions.id, existing.id))
+        .returning();
+      return updated;
+    }
+    const [row] = await db.insert(payrollTaxJurisdictions).values(data).returning();
+    return row;
+  },
+
+  /**
+   * Delete a tenant-scoped jurisdiction override. Refuses to touch
+   * platform rows (tenant_id IS NULL) so a misclick can't blow up the
+   * seeded defaults.
+   */
+  async deleteTenantJurisdiction(tenantId: string, id: string): Promise<void> {
+    const [row] = await db.select().from(payrollTaxJurisdictions)
+      .where(eq(payrollTaxJurisdictions.id, id));
+    if (!row) throw new Error('Jurisdiction not found');
+    if (row.tenantId === null) {
+      throw new Error('Cannot delete a platform-default jurisdiction (tenant_id IS NULL). Insert a tenant override to change it.');
+    }
+    if (row.tenantId !== tenantId) throw new Error('Not your tenant');
+    await db.delete(payrollTaxJurisdictions)
+      .where(eq(payrollTaxJurisdictions.id, id));
+  },
+
   // ---- Payroll Runs ----
   async listRuns(tenantId: string): Promise<PayrollRun[]> {
     return db.select().from(payrollRuns)
@@ -473,7 +522,10 @@ export const payrollStorage = {
         .where(and(eq(payrollRuns.tenantId, data.tenantId), eq(payrollRuns.idempotencyKey, data.idempotencyKey)));
       if (existing) return existing;
     }
-    const [row] = await db.insert(payrollRuns).values(data).returning();
+    // Cast around drizzle-zod's tuple-inference on jsonb columns
+    // (targetEmployeeIds). The runtime shape is correct; the type system
+    // collapses jsonb arrays into a tuple union that breaks .values().
+    const [row] = await db.insert(payrollRuns).values(data as any).returning();
     return row;
   },
 
@@ -500,10 +552,19 @@ export const payrollStorage = {
     if (!schedule) throw new Error('Schedule not found');
 
     const employees = await this.listEmployees(tenantId, false);
-    const elig = employees.filter(e =>
-      e.defaultPayScheduleId === run.payScheduleId &&
-      e.status !== 'terminated'
-    );
+    // Bonus / off-cycle runs persist a subset of payroll_employees.id in
+    // targetEmployeeIds. When set, restrict the run to that subset and
+    // SKIP the pay-schedule filter (a bonus run frequently pays people on
+    // different schedules, e.g. the FTE profit-sharing pool). When the
+    // array is missing or empty, fall back to the regular-run behaviour
+    // of every active employee on the run's pay schedule.
+    const targets = (run.targetEmployeeIds ?? null) as string[] | null;
+    const elig = (targets && targets.length > 0)
+      ? employees.filter(e => targets.includes(e.id) && e.status !== 'terminated')
+      : employees.filter(e =>
+          e.defaultPayScheduleId === run.payScheduleId &&
+          e.status !== 'terminated'
+        );
 
     const jurisdictions = await this.listJurisdictions(tenantId);
 
@@ -1037,6 +1098,11 @@ export const payrollStorage = {
         ssWagesCents: 0, ssTaxCents: 0,
         medicareWagesCents: 0, medicareTaxCents: 0, additionalMedicareTaxCents: 0,
         netPayCents: 0,
+        // Box 12 totals keyed by IRS code letter (W = HSA, D = 401(k), AA =
+        // Roth 401(k), DD = aggregate employer health cost, etc.). Only
+        // populated for w2 employees. Populated from `box12Code` stamped
+        // on each deduction line by the payroll engine (server/services/payroll-engine.ts).
+        box12: {} as Record<string, number>,
       };
       e.grossCents += r.grossCents;
       // Per-employee W-2 fields stay zero for 1099 rows so the W-2 CSV
@@ -1049,6 +1115,11 @@ export const payrollStorage = {
         e.medicareWagesCents += ficaTaxableWages;
         e.medicareTaxCents += employeeMc;
         e.additionalMedicareTaxCents += employeeAddlMc;
+        for (const l of lines) {
+          const code = (l as any).box12Code;
+          if (!code) continue;
+          e.box12[code] = (e.box12[code] ?? 0) + Math.abs(l.amountCents);
+        }
       }
       e.netPayCents += r.netPayCents;
       byEmployee.set(r.employeeId, e);
