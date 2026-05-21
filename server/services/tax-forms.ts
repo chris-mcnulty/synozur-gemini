@@ -65,6 +65,11 @@ export interface TaxTotalsInput {
     medicareTaxCents: number;
     additionalMedicareTaxCents: number;
     netPayCents: number;
+    // Box 10 — dependent-care FSA total. Sourced from deductions tagged
+    // with benefitCategory='fsa_dependent_care' in the run breakdown.
+    // Box 10 is its own W-2 box, NOT a Box 12 code, so it lives on its
+    // own field (and gets summed into the EFW2 RT total record).
+    dependentCareCents?: number;
     // W-2 Box 12 totals for the year, keyed by IRS code letter (W = HSA,
     // D = 401(k), AA = Roth 401(k), DD = employer-sponsored health cost,
     // E = 403(b), G = 457, S = SIMPLE). Aggregated from box12Code stamped
@@ -167,16 +172,22 @@ export function render941Html(opts: {
 // deduction shows up in the 'Box 12 - other' column as code:amount pairs.
 const BOX12_PRIMARY_CODES = ['W', 'D', 'AA', 'DD'] as const;
 
-/** W-2 box totals as CSV. One row per W-2 employee for the calendar year. */
+/** W-2 box totals as CSV. One row per W-2 employee for the calendar year.
+ *  Box 4 / Box 6 come from the YTD actual withholdings stamped on each
+ *  run-item breakdown — wages × 6.2% / 1.45% would miss the Social
+ *  Security cap, rounding drift, and the 0.9% Additional Medicare
+ *  surcharge (which folds into Box 6 per IRS Pub 15). Box 10 carries
+ *  the year's dependent-care FSA total. */
 export function renderW2Csv(input: TaxTotalsInput): string {
   const header = [
     'Employee ID', 'Name', 'Email',
     'Box 1 - Wages',
     'Box 2 - Fed Income Tax',
     'Box 3 - SS Wages',
-    'Box 4 - SS Tax (6.2%)',
+    'Box 4 - SS Tax (actual)',
     'Box 5 - Medicare Wages',
-    'Box 6 - Medicare Tax (1.45%)',
+    'Box 6 - Medicare Tax (actual + add\'l)',
+    'Box 10 - Dependent Care',
     'Box 12 W - HSA',
     'Box 12 D - 401(k)',
     'Box 12 AA - Roth 401(k)',
@@ -189,14 +200,18 @@ export function renderW2Csv(input: TaxTotalsInput): string {
       .filter(([code]) => !BOX12_PRIMARY_CODES.includes(code as any))
       .map(([code, cents]) => `${code}:${usd(cents)}`)
       .join('; ');
+    // Box 6 = regular Medicare + Additional Medicare (0.9% surcharge above
+    // $200K single / $250K MFJ). Both come from the run breakdown.
+    const box6 = e.medicareTaxCents + (e.additionalMedicareTaxCents ?? 0);
     return [
       e.employeeId, e.name, e.email ?? '',
       usd(e.taxableWagesCents),
       usd(e.fedIncomeTaxCents),
       usd(e.ssWagesCents),
-      usd(Math.round(e.ssWagesCents * 0.062)),
+      usd(e.ssTaxCents),
       usd(e.medicareWagesCents),
-      usd(Math.round(e.medicareWagesCents * 0.0145)),
+      usd(box6),
+      usd(e.dependentCareCents ?? 0),
       usd(b12.W ?? 0),
       usd(b12.D ?? 0),
       usd(b12.AA ?? 0),

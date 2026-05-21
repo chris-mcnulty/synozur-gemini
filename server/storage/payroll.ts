@@ -1098,6 +1098,10 @@ export const payrollStorage = {
         ssWagesCents: 0, ssTaxCents: 0,
         medicareWagesCents: 0, medicareTaxCents: 0, additionalMedicareTaxCents: 0,
         netPayCents: 0,
+        // Box 10 (dependent-care FSA) — its own W-2 box, NOT a Box 12 code.
+        // Sourced from deductions whose benefitCategory='fsa_dependent_care'
+        // (engine stamps benefitCategory on each line alongside box12Code).
+        dependentCareCents: 0,
         // Box 12 totals keyed by IRS code letter (W = HSA, D = 401(k), AA =
         // Roth 401(k), DD = aggregate employer health cost, etc.). Only
         // populated for w2 employees. Populated from `box12Code` stamped
@@ -1117,6 +1121,10 @@ export const payrollStorage = {
         e.additionalMedicareTaxCents += employeeAddlMc;
         for (const l of lines) {
           const code = (l as any).box12Code;
+          const cat = (l as any).benefitCategory;
+          if (cat === 'fsa_dependent_care') {
+            e.dependentCareCents += Math.abs(l.amountCents);
+          }
           if (!code) continue;
           e.box12[code] = (e.box12[code] ?? 0) + Math.abs(l.amountCents);
         }

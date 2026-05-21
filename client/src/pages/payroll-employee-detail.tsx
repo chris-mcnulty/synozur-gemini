@@ -217,7 +217,9 @@ export default function PayrollEmployeeDetail() {
                   if (v === 'hsa')                     { next.deductionType = 'pre_tax';  next.preTaxScope = 'all';          next.box12Code = 'W'; }
                   else if (v === 'health')             { next.deductionType = 'pre_tax';  next.preTaxScope = 'all';          next.box12Code = ''; }
                   else if (v === 'fsa_health')         { next.deductionType = 'pre_tax';  next.preTaxScope = 'all';          next.box12Code = ''; }
-                  else if (v === 'fsa_dependent_care') { next.deductionType = 'pre_tax';  next.preTaxScope = 'all';          next.box12Code = 'FSA-DC'; }
+                  // Dependent-care FSA goes in W-2 Box 10, NOT Box 12.
+                  // Routing is driven by benefitCategory; leave box12Code empty.
+                  else if (v === 'fsa_dependent_care') { next.deductionType = 'pre_tax';  next.preTaxScope = 'all';          next.box12Code = ''; }
                   else if (v === 'retirement_401k')    { next.deductionType = 'pre_tax';  next.preTaxScope = 'federal_only'; next.box12Code = 'D'; }
                   else if (v === 'retirement_roth_401k'){ next.deductionType = 'post_tax';                                    next.box12Code = 'AA'; }
                   else if (v === 'section_125_other')  { next.deductionType = 'pre_tax';  next.preTaxScope = 'all';          next.box12Code = ''; }
@@ -258,7 +260,7 @@ export default function PayrollEmployeeDetail() {
                   </Select>
                 </div>
               )}
-              <div><Label>Box 12 code</Label><Input maxLength={6} value={ded.box12Code || ''} onChange={ev => setDed({ ...ded, box12Code: ev.target.value.toUpperCase() })} placeholder="W, D, AA…" /></div>
+              <div><Label>Box 12 code</Label><Input maxLength={2} value={ded.box12Code || ''} onChange={ev => setDed({ ...ded, box12Code: ev.target.value.toUpperCase() })} placeholder="W, D, AA…" /></div>
               <div><Label>Amount (USD)</Label><Input type="number" step="0.01" onChange={ev => setDed({ ...ded, amountCents: ev.target.value ? Math.round(Number(ev.target.value) * 100) : null })} /></div>
               <div><Label>% gross</Label><Input type="number" step="0.01" onChange={ev => setDed({ ...ded, percentOfGross: ev.target.value || null })} /></div>
               <div><Button onClick={() => addDed.mutate(ded)} disabled={addDed.isPending || !ded.name}>Add</Button></div>

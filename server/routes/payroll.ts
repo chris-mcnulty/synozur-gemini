@@ -105,6 +105,13 @@ export function registerPayrollRoutes(app: Express, deps: PayrollRouteDeps) {
     try {
       const tenantId = tenantOf(req);
       const body = insertPayrollEmployeeSchema.parse({ ...req.body, tenantId });
+      // Never trust a client-supplied ciphertext or last-4 — both fields
+      // must be derived server-side from `ssnFull` (handled below). Strip
+      // them off the parsed body before we touch the DB so a hostile
+      // request can't overwrite an existing encrypted SSN with garbage
+      // (the schema includes them since drizzle-zod inferred them).
+      delete (body as any).ssnEnc;
+      delete (body as any).ssnLast4;
       // If linked to an internal user, prevent duplicate active payroll rows
       // for the same person.
       if (body.userId) {
@@ -168,9 +175,11 @@ export function registerPayrollRoutes(app: Express, deps: PayrollRouteDeps) {
         }
         (updates as any).ssnEnc = encryptString(digits);
         (updates as any).ssnLast4 = digits.slice(-4);
-      } else if ('ssnEnc' in updates) {
-        // Never trust a client-supplied ssnEnc — strip it.
+      } else if ('ssnEnc' in updates || 'ssnLast4' in updates) {
+        // Never trust a client-supplied ciphertext or last-4 — only the
+        // server-derived ssnFull path may set them.
         delete (updates as any).ssnEnc;
+        delete (updates as any).ssnLast4;
       }
       const emp = await payrollStorage.updateEmployee(tenantId, req.params.id, updates);
       await payrollStorage.appendAudit({
@@ -276,6 +285,13 @@ export function registerPayrollRoutes(app: Express, deps: PayrollRouteDeps) {
   // routes pick these up automatically. Plain strings or JSON-encoded
   // objects (filer_address_json, filer_contact_json) so we can keep the
   // tenant_settings table schema-free.
+  // Wrap JSON.parse so a corrupted tenant_settings row (legacy value,
+  // hand-edited DB, etc.) returns {} instead of 500'ing every fetch.
+  const safeJsonParse = (s: string | undefined | null): Record<string, any> => {
+    if (!s) return {};
+    try { return JSON.parse(s) ?? {}; } catch { return {}; }
+  };
+
   app.get('/api/payroll/tax-filing-settings', requireAuth, PM, async (req, res) => {
     try {
       const tenantId = tenantOf(req);
@@ -292,8 +308,8 @@ export function registerPayrollRoutes(app: Express, deps: PayrollRouteDeps) {
         softwareVendorCode: vendorCode ?? '',
         irsTcc: tcc ?? '',
         filerName: filerName ?? '',
-        filerAddress: addrJson ? JSON.parse(addrJson) : {},
-        filerContact: contactJson ? JSON.parse(contactJson) : {},
+        filerAddress: safeJsonParse(addrJson),
+        filerContact: safeJsonParse(contactJson),
       });
     } catch (e: any) { res.status(500).json({ message: e.message }); }
   });
@@ -877,8 +893,8 @@ export function registerPayrollRoutes(app: Express, deps: PayrollRouteDeps) {
         ?? await storage.getTenantSettingValue(tenantId, TENANT_KEY_FILER_NAME);
       const filerAddrRaw = await storage.getTenantSettingValue(tenantId, TENANT_KEY_FILER_ADDRESS);
       const filerContactRaw = await storage.getTenantSettingValue(tenantId, TENANT_KEY_FILER_CONTACT);
-      const filerAddr = filerAddrRaw ? JSON.parse(filerAddrRaw) : {};
-      const filerContact = filerContactRaw ? JSON.parse(filerContactRaw) : {};
+      const filerAddr = safeJsonParse(filerAddrRaw);
+      const filerContact = safeJsonParse(filerContactRaw);
       const ach = await payrollStorage.getAchOriginator(tenantId);
       const fallbackEin = ach?.companyId.replace(/^1/, ''); // ACH carries '1' + EIN
 
@@ -901,6 +917,27 @@ export function registerPayrollRoutes(app: Express, deps: PayrollRouteDeps) {
       if (!/^\d{9}$/.test((submitter.ein || '').replace(/\D/g, ''))) {
         return res.status(400).json({
           message: 'Submitter EIN missing — set the ACH originator profile, the filer info in Payroll → Tax Filing Settings, or pass submitter.ein in the request.',
+        });
+      }
+      // SSA AccuWage rejects an EFW2 file with blank required submitter
+      // fields, so fail closed here with a clear message instead of
+      // emitting an invalid file and returning 200.
+      const submitterRequired: Array<[keyof typeof submitter, string]> = [
+        ['name', 'submitter.name'],
+        ['addressLine1', 'submitter.addressLine1'],
+        ['city', 'submitter.city'],
+        ['stateCode', 'submitter.stateCode'],
+        ['zip', 'submitter.zip'],
+        ['contactName', 'submitter.contactName'],
+        ['contactPhone', 'submitter.contactPhone'],
+      ];
+      const submitterMissing = submitterRequired
+        .filter(([k]) => !String(submitter[k] ?? '').trim())
+        .map(([, label]) => label);
+      if (submitterMissing.length > 0) {
+        return res.status(400).json({
+          message: `EFW2 submitter is missing required fields: ${submitterMissing.join(', ')}. Fill them in under Payroll → Tax Filing Settings or pass them in the request body.`,
+          missingFields: submitterMissing,
         });
       }
       const employer = body.employer ?? (fallbackEin ? {
@@ -1032,8 +1069,8 @@ export function registerPayrollRoutes(app: Express, deps: PayrollRouteDeps) {
       const filerName = await storage.getTenantSettingValue(tenantId, TENANT_KEY_FILER_NAME);
       const filerAddrRaw = await storage.getTenantSettingValue(tenantId, TENANT_KEY_FILER_ADDRESS);
       const filerContactRaw = await storage.getTenantSettingValue(tenantId, TENANT_KEY_FILER_CONTACT);
-      const filerAddr = filerAddrRaw ? JSON.parse(filerAddrRaw) : {};
-      const filerContact = filerContactRaw ? JSON.parse(filerContactRaw) : {};
+      const filerAddr = safeJsonParse(filerAddrRaw);
+      const filerContact = safeJsonParse(filerContactRaw);
       const tcc = body.transmitter?.tcc
         ?? await storage.getTenantSettingValue(tenantId, TENANT_KEY_IRS_TCC);
       if (!tcc || tcc.length !== 5) {
@@ -1057,6 +1094,27 @@ export function registerPayrollRoutes(app: Express, deps: PayrollRouteDeps) {
       if (!/^\d{9}$/.test((transmitter.tin || '').replace(/\D/g, ''))) {
         return res.status(400).json({
           message: 'Transmitter TIN missing — set the ACH originator profile, filer info, or pass transmitter.tin in the request.',
+        });
+      }
+      // IRS FIRE rejects a file with blank required transmitter fields.
+      // Fail closed with a clear message instead of generating an
+      // invalid file.
+      const transmitterRequired: Array<[keyof typeof transmitter, string]> = [
+        ['name', 'transmitter.name'],
+        ['addressLine1', 'transmitter.addressLine1'],
+        ['city', 'transmitter.city'],
+        ['stateCode', 'transmitter.stateCode'],
+        ['zip', 'transmitter.zip'],
+        ['contactName', 'transmitter.contactName'],
+        ['contactPhone', 'transmitter.contactPhone'],
+      ];
+      const transmitterMissing = transmitterRequired
+        .filter(([k]) => !String(transmitter[k] ?? '').trim())
+        .map(([, label]) => label);
+      if (transmitterMissing.length > 0) {
+        return res.status(400).json({
+          message: `FIRE transmitter is missing required fields: ${transmitterMissing.join(', ')}. Fill them in under Payroll → Tax Filing Settings or pass them in the request body.`,
+          missingFields: transmitterMissing,
         });
       }
       const payer = body.payer ?? (fallbackEin ? {

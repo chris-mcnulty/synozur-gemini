@@ -4519,16 +4519,24 @@ export const payrollDeductions = pgTable("payroll_deductions", {
   //                     only; FICA + FUTA still apply
   // Pre-existing rows are backfilled to 'all' (the engine's prior behaviour).
   preTaxScope: varchar("pre_tax_scope", { length: 20 }).default('federal_only'),
-  // W-2 Box 12 reporting. box12Code is the IRS code letter (W = HSA, D =
-  // 401(k), DD = employer-sponsored health coverage, E = 403(b), G = 457,
-  // S = SIMPLE retirement). benefitCategory is a human-readable bucket
-  // used by the engine + tax-form generators to group deductions:
+  // W-2 Box 12 reporting. box12Code holds the literal 1-2 character IRS
+  // code letter that goes in Box 12 (W = HSA, D = 401(k), DD = employer-
+  // sponsored health coverage, E = 403(b), G = 457, S = SIMPLE, AA = Roth
+  // 401(k), BB = Roth 403(b)…). The DB column is varchar(2) and the
+  // tax-form generators trust that — DO NOT pack non-Box-12 sentinels
+  // (e.g. dependent-care FSA) in here; Box 10 and Box 14 have their own
+  // routing, driven by benefitCategory.
+  //
+  // benefitCategory is a wider human-readable bucket used by the engine
+  // + tax-form generators to route deductions:
   //   'hsa'                 — pre-tax HSA (Section 125, Box 12 code W)
   //   'health'              — Section 125 health/dental/vision premium
   //                           (employee share; not separately Boxed unless
   //                           reporting employer DD aggregate cost)
   //   'fsa_health'          — FSA medical (Section 125)
-  //   'fsa_dependent_care'  — Dependent care FSA (Section 125, Box 10)
+  //   'fsa_dependent_care'  — Dependent care FSA (Section 125). Routes
+  //                           to W-2 Box 10 / EFW2 RW 270-280; box12Code
+  //                           stays empty.
   //   'retirement_401k'     — 401(k) traditional (Box 12 code D)
   //   'retirement_roth_401k'— Roth 401(k) (Box 12 code AA, post-tax)
   //   'section_125_other'   — other cafeteria plan deduction

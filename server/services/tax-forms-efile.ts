@@ -137,7 +137,13 @@ export interface Efw2Employee {
   ssTaxCents: number;          // Box 4
   medicareWagesCents: number;  // Box 5
   medicareTaxCents: number;    // Box 6
-  /** Optional Box 12 entries (e.g., D for 401(k), DD for employer health). */
+  /** Box 10 — dependent-care FSA total. Its own W-2 box, separate from
+   *  Box 12. SSA EFW2 RW position 270-280 carries this amount and the
+   *  RT total record sums it across all RWs. */
+  dependentCareCents?: number;
+  /** Optional Box 12 entries (e.g., D for 401(k), DD for employer health).
+   *  Codes are 1-2 letters per IRS spec; do not pack non-Box-12 amounts
+   *  (Box 10 dependent care, Box 11 nonqualified) into this array. */
   box12?: Array<{ code: string; amountCents: number }>;
 }
 
@@ -207,7 +213,9 @@ function buildRw(emp: Efw2Employee): string {
   // D = 401(k) traditional, AA = Roth 401(k), DD = employer health, etc.).
   // Codes that don't have a dedicated SSA field slot (DD, W, etc. -- they
   // belong in RO record, not RW) are written via the RO Optional Record
-  // built below.
+  // built below. Box 10 dependent care has its own dedicated slot below
+  // (270-280) and is sourced from emp.dependentCareCents — NOT a Box 12
+  // code.
   const b12 = (code: string): number => emp.box12?.find(b => b.code === code)?.amountCents ?? 0;
   const line =
     'RW' +                                  // 1-2
@@ -233,7 +241,7 @@ function buildRw(emp: Efw2Employee): string {
     fMoney(0, 11) +                         // 237-247 Box 7 SS tips
     fMoney(0, 11) +                         // 248-258 Box 8 Allocated tips
     fMoney(0, 11) +                         // 259-269 Reserved (was advance EIC)
-    fMoney(b12('FSA-DC'), 11) +             // 270-280 Box 10 Dependent care (no IRS code letter; tag with 'FSA-DC')
+    fMoney(emp.dependentCareCents ?? 0, 11) + // 270-280 Box 10 Dependent care (NOT a Box 12 code)
     fMoney(0, 11) +                         // 281-291 Box 11 Nonqualified plans
     fMoney(b12('D'), 11) +                  // 292-302 Box 12 code D (401(k))
     fMoney(b12('E'), 11) +                  // 303-313 Box 12 code E (403(b))
@@ -283,10 +291,21 @@ function buildRo(emp: Efw2Employee): string | null {
   return pad(line, 512);
 }
 
-/** RT — Total Record. Sums every RW above this RE. */
+/** RT — Total Record. Sums every RW above this RE. The dependent-care
+ *  and deferred-compensation totals must agree with the per-employee
+ *  amounts on the RW lines or SSA AccuWage flags the file as
+ *  inconsistent. */
 function buildRt(employees: Efw2Employee[]): string {
   const sum = (k: keyof Efw2Employee) =>
     employees.reduce((acc, e) => acc + (typeof e[k] === 'number' ? (e[k] as number) : 0), 0);
+  // Sum Box 12 deferral codes (D = 401(k), E = 403(b), F = 408(k)(6),
+  // G = 457, H = 501(c)(18)(D), S = SIMPLE, AA = Roth 401(k),
+  // BB = Roth 403(b), EE = Roth 457) for the deferred-comp total field.
+  const sumBox12 = (codes: readonly string[]) => employees.reduce((acc, e) => {
+    const yr = e.box12 ?? [];
+    return acc + codes.reduce((s, c) => s + (yr.find(b => b.code === c)?.amountCents ?? 0), 0);
+  }, 0);
+  const deferredCodes = ['D', 'E', 'F', 'G', 'H', 'S', 'AA', 'BB', 'EE'] as const;
   const line =
     'RT' +                                  // 1-2
     fNum(employees.length, 7) +             // 3-9 Number of RWs
@@ -299,9 +318,9 @@ function buildRt(employees: Efw2Employee[]): string {
     fMoney(0, 15) +                         // 100-114 SS tips
     fMoney(0, 15) +                         // 115-129 Allocated tips
     fMoney(0, 15) +                         // 130-144 Reserved
-    fMoney(0, 15) +                         // 145-159 Dependent care
+    fMoney(sum('dependentCareCents'), 15) + // 145-159 Dependent care (sums RW Box 10)
     fMoney(0, 15) +                         // 160-174 Nonqualified plans
-    fMoney(0, 15) +                         // 175-189 Deferred compensation total
+    fMoney(sumBox12(deferredCodes), 15) +   // 175-189 Deferred compensation total
     ' '.repeat(308);                        // 190-512 Filler
   return pad(line, 512);
 }
