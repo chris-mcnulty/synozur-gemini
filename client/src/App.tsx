@@ -78,6 +78,8 @@ import PayrollRuns from "@/pages/payroll-runs";
 import PayrollRunDetail from "@/pages/payroll-run-detail";
 import PayrollGl from "@/pages/payroll-gl";
 import PayrollAudit from "@/pages/payroll-audit";
+import PayrollJurisdictions from "@/pages/payroll-jurisdictions";
+import PayrollTaxSettings from "@/pages/payroll-tax-settings";
 import Distributions from "@/pages/distributions";
 import DistributionRunDetail from "@/pages/distribution-run-detail";
 import MyPaystubs from "@/pages/my-paystubs";
@@ -510,6 +512,12 @@ function Router() {
       </Route>
       <Route path="/payroll/audit">
         {user ? <PermissionGuard allowedRoles={["admin", "billing-admin"]}><PayrollAudit /></PermissionGuard> : <Redirect to="/login" />}
+      </Route>
+      <Route path="/payroll/jurisdictions">
+        {user ? <PermissionGuard allowedRoles={["admin", "billing-admin"]}><PayrollJurisdictions /></PermissionGuard> : <Redirect to="/login" />}
+      </Route>
+      <Route path="/payroll/tax-settings">
+        {user ? <PermissionGuard allowedRoles={["admin", "billing-admin"]}><PayrollTaxSettings /></PermissionGuard> : <Redirect to="/login" />}
       </Route>
       {/* Quarterly distributions (owners + FTE bonus pool) */}
       <Route path="/distributions">

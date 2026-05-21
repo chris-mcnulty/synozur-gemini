@@ -4,7 +4,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Link } from "wouter";
 import { fmtMoney, fmtDate } from "@/lib/payroll-format";
-import { Users, Wallet, Receipt, Play } from "lucide-react";
+import { Users, Wallet, Receipt, Play, Landmark, FileSpreadsheet } from "lucide-react";
 
 export default function PayrollDashboard() {
   const { data: summary } = useQuery<any>({ queryKey: ["/api/payroll/summary"] });
@@ -18,9 +18,17 @@ export default function PayrollDashboard() {
             <h1 className="text-2xl font-semibold">Payroll Dashboard</h1>
             <p className="text-sm text-muted-foreground">Gemini · Workforce & Payroll</p>
           </div>
-          <Link href="/payroll/runs">
-            <Button data-testid="button-go-runs"><Play className="h-4 w-4 mr-2" />Run payroll</Button>
-          </Link>
+          <div className="flex gap-2">
+            <Link href="/payroll/tax-settings">
+              <Button variant="outline" data-testid="button-go-tax-settings"><FileSpreadsheet className="h-4 w-4 mr-2" />Tax filing settings</Button>
+            </Link>
+            <Link href="/payroll/jurisdictions">
+              <Button variant="outline" data-testid="button-go-jurisdictions"><Landmark className="h-4 w-4 mr-2" />SUTA / Jurisdictions</Button>
+            </Link>
+            <Link href="/payroll/runs">
+              <Button data-testid="button-go-runs"><Play className="h-4 w-4 mr-2" />Run payroll</Button>
+            </Link>
+          </div>
         </div>
 
         <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
