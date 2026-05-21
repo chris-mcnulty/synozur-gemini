@@ -225,24 +225,32 @@ export function renderW2Csv(input: TaxTotalsInput): string {
 /**
  * W-3 transmittal summary (one row). The W-3 totals across all W-2s for
  * the year; this is the data that goes on the cover sheet sent to SSA.
+ * Tax totals come from the run-breakdown actuals — recomputing
+ * wages × rate would miss the Social Security cap, rounding drift, and
+ * the 0.9% Add'l Medicare surcharge, and would make W-3 disagree with
+ * the underlying W-2 rows.
  */
 export function renderW3Csv(input: TaxTotalsInput): string {
   const totals = input.w2Employees.reduce((acc, e) => ({
     box1: acc.box1 + e.taxableWagesCents,
     box2: acc.box2 + e.fedIncomeTaxCents,
     box3: acc.box3 + e.ssWagesCents,
+    box4: acc.box4 + e.ssTaxCents,
     box5: acc.box5 + e.medicareWagesCents,
+    // Box 6 includes Additional Medicare per IRS Pub 15 — it's still
+    // Medicare tax on the W-2/W-3.
+    box6: acc.box6 + e.medicareTaxCents + (e.additionalMedicareTaxCents ?? 0),
     count: acc.count + 1,
-  }), { box1: 0, box2: 0, box3: 0, box5: 0, count: 0 });
+  }), { box1: 0, box2: 0, box3: 0, box4: 0, box5: 0, box6: 0, count: 0 });
   return [
     'Field,Amount',
     `Number of W-2s,${totals.count}`,
     `Box 1 - Total Wages,${usd(totals.box1)}`,
     `Box 2 - Total Fed Income Tax,${usd(totals.box2)}`,
     `Box 3 - Total SS Wages,${usd(totals.box3)}`,
-    `Box 4 - Total SS Tax,${usd(Math.round(totals.box3 * 0.062))}`,
+    `Box 4 - Total SS Tax,${usd(totals.box4)}`,
     `Box 5 - Total Medicare Wages,${usd(totals.box5)}`,
-    `Box 6 - Total Medicare Tax,${usd(Math.round(totals.box5 * 0.0145))}`,
+    `Box 6 - Total Medicare Tax,${usd(totals.box6)}`,
   ].join('\n');
 }
 

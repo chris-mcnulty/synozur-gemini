@@ -433,7 +433,12 @@ export const payrollStorage = {
           name: data.name,
           level: data.level,
           rule: data.rule,
-          isActive: data.isActive ?? true,
+          // Preserve the existing isActive flag when the caller didn't
+          // explicitly send one; createInsertSchema defaults make
+          // `undefined` indistinguishable from "not specified", so
+          // falling back to `true` would silently re-activate a row
+          // an admin had just deactivated.
+          isActive: data.isActive ?? existing.isActive,
         })
         .where(eq(payrollTaxJurisdictions.id, existing.id))
         .returning();
@@ -555,10 +560,16 @@ export const payrollStorage = {
     // Bonus / off-cycle runs persist a subset of payroll_employees.id in
     // targetEmployeeIds. When set, restrict the run to that subset and
     // SKIP the pay-schedule filter (a bonus run frequently pays people on
-    // different schedules, e.g. the FTE profit-sharing pool). When the
-    // array is missing or empty, fall back to the regular-run behaviour
-    // of every active employee on the run's pay schedule.
+    // different schedules, e.g. the FTE profit-sharing pool). Regular
+    // runs fall back to every active employee on the run's pay schedule.
     const targets = (run.targetEmployeeIds ?? null) as string[] | null;
+    // Defensive fail-closed: a bonus run that somehow reached preview
+    // without targets (legacy row, manual DB edit) would otherwise pay
+    // the entire schedule. The schema's superRefine prevents this at
+    // create time, but the engine guards the invariant too.
+    if (run.runType === 'bonus' && (!targets || targets.length === 0)) {
+      throw new Error('Bonus run has no targetEmployeeIds; refusing to pay all employees.');
+    }
     const elig = (targets && targets.length > 0)
       ? employees.filter(e => targets.includes(e.id) && e.status !== 'terminated')
       : employees.filter(e =>

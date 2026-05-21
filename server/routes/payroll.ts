@@ -59,12 +59,26 @@ export function registerPayrollRoutes(app: Express, deps: PayrollRouteDeps) {
   });
 
   // ---- Employees ----
+  // Strip ciphertext fields and surface masked display values + booleans
+  // so the list endpoint never ships AES-encrypted SSN / bank data to
+  // the browser. Mirrors the detail endpoint's sanitization. Used by
+  // both `/api/payroll/employees` and any other handler returning lists
+  // of employee rows.
+  const sanitizeEmployeeRow = (e: any) => ({
+    ...e,
+    bankAccountNumberEnc: undefined,
+    bankAccountMasked: maskLast4(e.bankAccountNumberEnc),
+    hasBankAccount: !!e.bankAccountNumberEnc,
+    ssnEnc: undefined,
+    hasFullSsn: !!e.ssnEnc,
+  });
+
   app.get('/api/payroll/employees', requireAuth, PM, async (req, res) => {
     try {
       const includeTerminated = req.query.includeTerminated === 'true';
       const list = await payrollStorage.listEmployees(tenantOf(req), includeTerminated);
       const enriched = await payrollStorage.enrichWithUsers(list);
-      res.json(enriched);
+      res.json(enriched.map(sanitizeEmployeeRow));
     } catch (e: any) { res.status(500).json({ message: e.message }); }
   });
 
@@ -858,6 +872,11 @@ export function registerPayrollRoutes(app: Express, deps: PayrollRouteDeps) {
             ssTaxCents: t.ssTaxCents,
             medicareWagesCents: t.medicareWagesCents,
             medicareTaxCents: t.medicareTaxCents + t.additionalMedicareTaxCents,
+            // Box 10 (dependent-care FSA) — its own W-2 box, sourced from
+            // taxTotals' per-employee aggregate of benefitCategory =
+            // 'fsa_dependent_care' deduction lines. Goes to EFW2 RW
+            // position 270-280 and sums into the RT total record.
+            dependentCareCents: t.dependentCareCents ?? 0,
             box12,
           };
         })

@@ -4639,6 +4639,33 @@ export const insertPayrollRunSchema = createInsertSchema(payrollRuns).omit({
   id: true, createdAt: true, approvedAt: true, finalizedAt: true,
   totalGrossCents: true, totalEmployeeTaxCents: true, totalEmployerTaxCents: true,
   totalDeductionsCents: true, totalNetCents: true,
+}).superRefine((v, ctx) => {
+  // Cross-field invariants on run targeting:
+  //   - bonus runs MUST carry a non-empty targetEmployeeIds array — without
+  //     it, previewRun would fall back to "every active employee on the
+  //     schedule" and pay everyone, which is the exact accidental
+  //     overpayment scenario the field exists to prevent.
+  //   - regular runs MUST NOT carry targetEmployeeIds — the field is
+  //     bonus-only by design; silently ignoring it for regular runs would
+  //     mask client bugs.
+  //   - reversal runs build their item set from the run they undo, so
+  //     they're allowed to omit it.
+  const ids = (v.targetEmployeeIds ?? null) as string[] | null;
+  if (v.runType === 'bonus') {
+    if (!ids || ids.length === 0) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['targetEmployeeIds'],
+        message: 'Bonus runs require a non-empty targetEmployeeIds list.',
+      });
+    }
+  } else if (v.runType === 'regular' && ids && ids.length > 0) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['targetEmployeeIds'],
+      message: 'targetEmployeeIds is only valid on bonus runs.',
+    });
+  }
 });
 export type InsertPayrollRun = z.infer<typeof insertPayrollRunSchema>;
 export type PayrollRun = typeof payrollRuns.$inferSelect;
