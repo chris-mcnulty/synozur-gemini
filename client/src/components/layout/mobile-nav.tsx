@@ -134,7 +134,7 @@ interface SectionRoute {
 }
 
 const sectionRoutes: SectionRoute[] = [
-  { sectionId: "payroll", paths: ["/payroll", "/payroll/employees", "/payroll/schedules", "/payroll/runs", "/payroll/gl", "/payroll/audit", "/distributions"] },
+  { sectionId: "payroll", paths: ["/payroll", "/payroll/employees", "/payroll/schedules", "/payroll/runs", "/payroll/gl", "/payroll/audit", "/distributions", "/payroll/jurisdictions", "/payroll/tax-settings"] },
   { sectionId: "my-workspace", paths: ["/my-dashboard", "/my-assignments", "/my-projects", "/time", "/expenses", "/expense-reports", "/my-reimbursements", "/my-raidd"] },
   { sectionId: "portfolio", paths: ["/", "/dashboard", "/portfolio/timeline", "/portfolio/raidd", "/reports", "/executive-narrative", "/projects", "/clients", "/resource-management", "/resource-planning", "/resource-planning/capacity", "/crm/deals"] },
   { sectionId: "financial", paths: ["/billing", "/invoice-report", "/client-revenue-report", "/expense-management", "/expense-approval", "/reimbursement-batches", "/rates"] },
@@ -258,6 +258,8 @@ export function MobileNav() {
                   <MobileSubGroupLabel label="Accounting" />
                   <MobileNavItem href="/payroll/gl" icon={<Calculator />} label="General Ledger" onClick={handleNavClick} />
                   <MobileNavItem href="/payroll/audit" icon={<ScrollText />} label="Audit Log" onClick={handleNavClick} />
+                  <MobileNavItem href="/payroll/jurisdictions" icon={<Globe />} label="Jurisdictions" onClick={handleNavClick} />
+                  <MobileNavItem href="/payroll/tax-settings" icon={<Settings />} label="Tax Settings" onClick={handleNavClick} />
                 </MobileCollapsibleSection>
               )}
 
