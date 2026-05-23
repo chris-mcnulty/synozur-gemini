@@ -26,6 +26,8 @@ import {
   buildEfw2File, buildFire1099NecFile,
   type Efw2Employee, type FirePayee,
 } from "../services/tax-forms-efile";
+import { htmlToPdf } from "../services/html-to-pdf";
+import { storage } from "../storage";
 
 interface PayrollRouteDeps {
   requireAuth: any;
@@ -57,12 +59,26 @@ export function registerPayrollRoutes(app: Express, deps: PayrollRouteDeps) {
   });
 
   // ---- Employees ----
+  // Strip ciphertext fields and surface masked display values + booleans
+  // so the list endpoint never ships AES-encrypted SSN / bank data to
+  // the browser. Mirrors the detail endpoint's sanitization. Used by
+  // both `/api/payroll/employees` and any other handler returning lists
+  // of employee rows.
+  const sanitizeEmployeeRow = (e: any) => ({
+    ...e,
+    bankAccountNumberEnc: undefined,
+    bankAccountMasked: maskLast4(e.bankAccountNumberEnc),
+    hasBankAccount: !!e.bankAccountNumberEnc,
+    ssnEnc: undefined,
+    hasFullSsn: !!e.ssnEnc,
+  });
+
   app.get('/api/payroll/employees', requireAuth, PM, async (req, res) => {
     try {
       const includeTerminated = req.query.includeTerminated === 'true';
       const list = await payrollStorage.listEmployees(tenantOf(req), includeTerminated);
       const enriched = await payrollStorage.enrichWithUsers(list);
-      res.json(enriched);
+      res.json(enriched.map(sanitizeEmployeeRow));
     } catch (e: any) { res.status(500).json({ message: e.message }); }
   });
 
@@ -83,14 +99,17 @@ export function registerPayrollRoutes(app: Express, deps: PayrollRouteDeps) {
       const compensation = await payrollStorage.listCompensation(tenantId, emp.id);
       const deductions = await payrollStorage.listDeductions(tenantId, emp.id);
       const pto = await payrollStorage.listPto(tenantId, emp.id);
-      // Never echo the ciphertext or plain account number to the client;
-      // send a masked display string and a boolean indicating whether one
-      // is on file so the form knows whether to render "Replace" vs "Set".
+      // Never echo the ciphertext or plain account number / SSN to the
+      // client; send a masked display string and a boolean indicating
+      // whether one is on file so the form knows whether to render
+      // "Replace" vs "Set".
       const safeEmployee = {
         ...enriched,
         bankAccountNumberEnc: undefined,
         bankAccountMasked: maskLast4(enriched.bankAccountNumberEnc),
         hasBankAccount: !!enriched.bankAccountNumberEnc,
+        ssnEnc: undefined,
+        hasFullSsn: !!(enriched as any).ssnEnc,
       };
       res.json({ employee: safeEmployee, compensation, deductions, pto });
     } catch (e: any) { res.status(500).json({ message: e.message }); }
@@ -100,6 +119,13 @@ export function registerPayrollRoutes(app: Express, deps: PayrollRouteDeps) {
     try {
       const tenantId = tenantOf(req);
       const body = insertPayrollEmployeeSchema.parse({ ...req.body, tenantId });
+      // Never trust a client-supplied ciphertext or last-4 — both fields
+      // must be derived server-side from `ssnFull` (handled below). Strip
+      // them off the parsed body before we touch the DB so a hostile
+      // request can't overwrite an existing encrypted SSN with garbage
+      // (the schema includes them since drizzle-zod inferred them).
+      delete (body as any).ssnEnc;
+      delete (body as any).ssnLast4;
       // If linked to an internal user, prevent duplicate active payroll rows
       // for the same person.
       if (body.userId) {
@@ -113,9 +139,18 @@ export function registerPayrollRoutes(app: Express, deps: PayrollRouteDeps) {
       }
       // Encrypt bank account number at the API boundary so plain text never
       // touches storage. The column is named *Enc so the field stays valid
-      // when encryption is enabled.
+      // when encryption is enabled. Same envelope is used for ssn_enc.
       if (body.bankAccountNumberEnc) {
         body.bankAccountNumberEnc = encryptString(body.bankAccountNumberEnc) as any;
+      }
+      const ssnFull = (req.body as any)?.ssnFull as string | undefined;
+      if (ssnFull) {
+        const digits = ssnFull.replace(/\D/g, '');
+        if (digits.length !== 9) {
+          return res.status(400).json({ message: 'ssnFull must be a 9-digit SSN.' });
+        }
+        (body as any).ssnEnc = encryptString(digits);
+        (body as any).ssnLast4 = digits.slice(-4);
       }
       const emp = await payrollStorage.createEmployee(body);
       // Keep the global users.payroll_employee_type flag aligned, but only
@@ -142,6 +177,23 @@ export function registerPayrollRoutes(app: Express, deps: PayrollRouteDeps) {
       const { tenantId: _t, ...updates } = body;
       if ('bankAccountNumberEnc' in updates && updates.bankAccountNumberEnc) {
         updates.bankAccountNumberEnc = encryptString(updates.bankAccountNumberEnc) as any;
+      }
+      // Accept a plaintext full SSN on the PATCH body (`ssnFull`), encrypt
+      // and stash it in ssn_enc, and refresh ssn_last4 for display. Never
+      // accept an already-encrypted value via the route boundary.
+      const ssnFull = (req.body as any)?.ssnFull as string | undefined;
+      if (ssnFull) {
+        const digits = ssnFull.replace(/\D/g, '');
+        if (digits.length !== 9) {
+          return res.status(400).json({ message: 'ssnFull must be a 9-digit SSN.' });
+        }
+        (updates as any).ssnEnc = encryptString(digits);
+        (updates as any).ssnLast4 = digits.slice(-4);
+      } else if ('ssnEnc' in updates || 'ssnLast4' in updates) {
+        // Never trust a client-supplied ciphertext or last-4 — only the
+        // server-derived ssnFull path may set them.
+        delete (updates as any).ssnEnc;
+        delete (updates as any).ssnLast4;
       }
       const emp = await payrollStorage.updateEmployee(tenantId, req.params.id, updates);
       await payrollStorage.appendAudit({
@@ -242,6 +294,92 @@ export function registerPayrollRoutes(app: Express, deps: PayrollRouteDeps) {
     } catch (e: any) { res.status(400).json({ message: e.message }); }
   });
 
+  // ---- Tax-Filing Settings (SSA BSO, IRS TCC, filer info) ----
+  // Persisted in tenant_settings under fixed keys; the EFW2 + FIRE
+  // routes pick these up automatically. Plain strings or JSON-encoded
+  // objects (filer_address_json, filer_contact_json) so we can keep the
+  // tenant_settings table schema-free.
+  // Wrap JSON.parse so a corrupted tenant_settings row (legacy value,
+  // hand-edited DB, etc.) returns {} instead of 500'ing every fetch.
+  const safeJsonParse = (s: string | undefined | null): Record<string, any> => {
+    if (!s) return {};
+    try { return JSON.parse(s) ?? {}; } catch { return {}; }
+  };
+
+  app.get('/api/payroll/tax-filing-settings', requireAuth, PM, async (req, res) => {
+    try {
+      const tenantId = tenantOf(req);
+      const [bsoUserId, vendorCode, tcc, filerName, addrJson, contactJson] = await Promise.all([
+        storage.getTenantSettingValue(tenantId, 'payroll.bso_user_id'),
+        storage.getTenantSettingValue(tenantId, 'payroll.software_vendor_code'),
+        storage.getTenantSettingValue(tenantId, 'payroll.irs_tcc'),
+        storage.getTenantSettingValue(tenantId, 'payroll.filer_name'),
+        storage.getTenantSettingValue(tenantId, 'payroll.filer_address_json'),
+        storage.getTenantSettingValue(tenantId, 'payroll.filer_contact_json'),
+      ]);
+      res.json({
+        bsoUserId: bsoUserId ?? '',
+        softwareVendorCode: vendorCode ?? '',
+        irsTcc: tcc ?? '',
+        filerName: filerName ?? '',
+        filerAddress: safeJsonParse(addrJson),
+        filerContact: safeJsonParse(contactJson),
+      });
+    } catch (e: any) { res.status(500).json({ message: e.message }); }
+  });
+
+  const taxFilingSettingsBody = z.object({
+    bsoUserId: z.string().length(8).optional().or(z.literal('')),
+    softwareVendorCode: z.string().max(4).optional().or(z.literal('')),
+    irsTcc: z.string().length(5).optional().or(z.literal('')),
+    filerName: z.string().max(57).optional().or(z.literal('')),
+    filerAddress: z.object({
+      addressLine1: z.string().optional(),
+      addressLine2: z.string().optional(),
+      city: z.string().optional(),
+      stateCode: z.string().length(2).optional(),
+      zip: z.string().optional(),
+    }).optional(),
+    filerContact: z.object({
+      name: z.string().optional(),
+      phone: z.string().optional(),
+      email: z.string().optional(),
+    }).optional(),
+  });
+
+  app.put('/api/payroll/tax-filing-settings', requireAuth, PM, async (req, res) => {
+    try {
+      const tenantId = tenantOf(req);
+      const body = taxFilingSettingsBody.parse(req.body);
+      const writes: Array<Promise<unknown>> = [];
+      const setOrClear = (key: string, value: string | undefined) => {
+        if (value === undefined) return;
+        if (value === '') {
+          writes.push(storage.deleteTenantSetting(tenantId, key));
+        } else {
+          writes.push(storage.setTenantSetting(tenantId, key, value));
+        }
+      };
+      setOrClear('payroll.bso_user_id', body.bsoUserId);
+      setOrClear('payroll.software_vendor_code', body.softwareVendorCode);
+      setOrClear('payroll.irs_tcc', body.irsTcc);
+      setOrClear('payroll.filer_name', body.filerName);
+      if (body.filerAddress !== undefined) {
+        setOrClear('payroll.filer_address_json', JSON.stringify(body.filerAddress));
+      }
+      if (body.filerContact !== undefined) {
+        setOrClear('payroll.filer_contact_json', JSON.stringify(body.filerContact));
+      }
+      await Promise.all(writes);
+      await payrollStorage.appendAudit({
+        tenantId, actorUserId: (req.user as any)?.id,
+        action: 'tax_filing_settings.update', entityType: 'tenant_settings',
+        entityId: tenantId, ipAddress: req.ip,
+      });
+      res.json({ ok: true });
+    } catch (e: any) { res.status(400).json({ message: e.message }); }
+  });
+
   // ---- Tax Jurisdictions ----
   app.get('/api/payroll/jurisdictions', requireAuth, PM, async (req, res) => {
     try { res.json(await payrollStorage.listJurisdictions(tenantOf(req))); }
@@ -252,7 +390,29 @@ export function registerPayrollRoutes(app: Express, deps: PayrollRouteDeps) {
     try {
       const tenantId = tenantOf(req);
       const body = insertPayrollTaxJurisdictionSchema.parse({ ...req.body, tenantId });
-      res.json(await payrollStorage.createJurisdiction(body));
+      const row = await payrollStorage.upsertTenantJurisdiction(body);
+      await payrollStorage.appendAudit({
+        tenantId, actorUserId: (req.user as any)?.id,
+        action: 'jurisdiction.upsert', entityType: 'jurisdiction', entityId: row.id,
+        details: { code: row.code, level: row.level, rule: row.rule }, ipAddress: req.ip,
+      });
+      res.json(row);
+    } catch (e: any) { res.status(400).json({ message: e.message }); }
+  });
+
+  // Delete a tenant-scoped override (returns the row to the platform default).
+  // Refuses to delete a platform row (tenant_id IS NULL) — those are seeded
+  // and only the migration should touch them.
+  app.delete('/api/payroll/jurisdictions/:id', requireAuth, PM, async (req, res) => {
+    try {
+      const tenantId = tenantOf(req);
+      await payrollStorage.deleteTenantJurisdiction(tenantId, req.params.id);
+      await payrollStorage.appendAudit({
+        tenantId, actorUserId: (req.user as any)?.id,
+        action: 'jurisdiction.delete', entityType: 'jurisdiction', entityId: req.params.id,
+        ipAddress: req.ip,
+      });
+      res.json({ ok: true });
     } catch (e: any) { res.status(400).json({ message: e.message }); }
   });
 
@@ -545,7 +705,11 @@ export function registerPayrollRoutes(app: Express, deps: PayrollRouteDeps) {
   app.get('/api/payroll/tax-forms/941', requireAuth, PM, async (req, res) => {
     try {
       const tenantId = tenantOf(req);
-      const q = z.object({ year: z.coerce.number().int(), quarter: z.coerce.number().int().min(1).max(4) }).parse(req.query);
+      const q = z.object({
+        year: z.coerce.number().int(),
+        quarter: z.coerce.number().int().min(1).max(4),
+        format: z.enum(['html', 'pdf']).optional(),
+      }).parse(req.query);
       const startMonth = (q.quarter - 1) * 3 + 1;
       const endMonth = startMonth + 2;
       const lastDay = new Date(Date.UTC(q.year, endMonth, 0)).getUTCDate();
@@ -561,6 +725,18 @@ export function registerPayrollRoutes(app: Express, deps: PayrollRouteDeps) {
         w2EmployeeCount: totals.w2Employees.length,
         scheduleB,
       });
+      if (q.format === 'pdf') {
+        const pdf = await htmlToPdf(html, {
+          format: 'Letter',
+          margin: { top: '0.5in', right: '0.5in', bottom: '0.5in', left: '0.5in' },
+        });
+        res.setHeader('Content-Type', 'application/pdf');
+        res.setHeader(
+          'Content-Disposition',
+          `attachment; filename="941-${q.year}-Q${q.quarter}.pdf"`,
+        );
+        return res.send(pdf);
+      }
       res.setHeader('Content-Type', 'text/html; charset=utf-8');
       res.send(html);
     } catch (e: any) { res.status(400).json({ message: e.message }); }
@@ -601,24 +777,30 @@ export function registerPayrollRoutes(app: Express, deps: PayrollRouteDeps) {
 
   // ---- E-file: SSA EFW2 (W-2) ---------------------------------------------
   // Generates the fixed-width 512-char EFW2 file uploadable to SSA BSO.
-  // The filer must supply their BSO User ID and EIN (not stored in schema
-  // yet — passed in the POST body). Test against SSA AccuWage before
-  // production submission.
+  // Submitter (BSO User ID + software vendor code) is loaded from tenant
+  // settings keys 'payroll.bso_user_id' and 'payroll.software_vendor_code'
+  // by default — POST body fields override per-call. Employer EIN +
+  // address default to the ACH originator profile, also overridable.
+  // Full 9-digit SSNs are pulled from payroll_employees.ssn_enc; if an
+  // active W-2 employee is missing an encrypted SSN the route returns 400
+  // listing the affected people. The legacy `fullSsns` body map is no
+  // longer supported — store the SSN on the employee instead.
   const efw2Body = z.object({
     year: z.coerce.number().int(),
     submitter: z.object({
-      userId: z.string().min(8).max(8),
-      ein: z.string(),
-      name: z.string(),
-      addressLine1: z.string(),
+      userId: z.string().min(8).max(8).optional(),
+      ein: z.string().optional(),
+      name: z.string().optional(),
+      addressLine1: z.string().optional(),
       addressLine2: z.string().optional(),
-      city: z.string(),
-      stateCode: z.string().length(2),
-      zip: z.string(),
-      contactName: z.string(),
-      contactPhone: z.string(),
+      city: z.string().optional(),
+      stateCode: z.string().length(2).optional(),
+      zip: z.string().optional(),
+      contactName: z.string().optional(),
+      contactPhone: z.string().optional(),
       contactEmail: z.string().optional(),
-    }),
+      softwareVendorCode: z.string().max(4).optional(),
+    }).partial().optional(),
     employer: z.object({
       ein: z.string(),
       name: z.string(),
@@ -630,6 +812,17 @@ export function registerPayrollRoutes(app: Express, deps: PayrollRouteDeps) {
     }).optional(),
   });
 
+  // Tenant-settings keys for SSA/IRS filer credentials. Stored as plain
+  // tenant_settings rows; the BSO User ID + TCC are not secrets per se
+  // (they identify the filer to SSA/IRS) but they're tenant-scoped config
+  // so the route doesn't need them on every request.
+  const TENANT_KEY_BSO_USER_ID = 'payroll.bso_user_id';
+  const TENANT_KEY_BSO_VENDOR_CODE = 'payroll.software_vendor_code';
+  const TENANT_KEY_IRS_TCC = 'payroll.irs_tcc';
+  const TENANT_KEY_FILER_NAME = 'payroll.filer_name';
+  const TENANT_KEY_FILER_ADDRESS = 'payroll.filer_address_json';
+  const TENANT_KEY_FILER_CONTACT = 'payroll.filer_contact_json';
+
   app.post('/api/payroll/tax-forms/w2-efw2', requireAuth, PM, async (req, res) => {
     try {
       const tenantId = tenantOf(req);
@@ -639,22 +832,31 @@ export function registerPayrollRoutes(app: Express, deps: PayrollRouteDeps) {
       );
       const employees = await payrollStorage.listEmployees(tenantId, true);
       const empById = new Map(employees.map(e => [e.id, e]));
-      // Resolve full SSN for each W-2 employee. The schema only stores
-      // last-4 today; production filing must source the full SSN from a
-      // PII vault. The route accepts a `fullSsns` map keyed by employeeId
-      // so the caller can wire that source in without changing the schema.
-      // No full SSN → hard-fail; we will never synthesize one.
-      const fullSsns: Record<string, string> = (req.body?.fullSsns ?? {}) as any;
+
+      // Pull SSN from the encrypted column on payroll_employees. Refuse to
+      // synthesize from last-4; an SSA-rejected file is the best outcome.
       const missing: string[] = [];
       const efw2Employees: Efw2Employee[] = totals.w2Employees
         .map((t: any): Efw2Employee | null => {
           const emp = empById.get(t.employeeId);
           if (!emp) return null;
-          const ssn = String(fullSsns[t.employeeId] ?? '').replace(/\D/g, '');
+          let ssn = '';
+          try {
+            ssn = (decryptString((emp as any).ssnEnc ?? null) ?? '').replace(/\D/g, '');
+          } catch {
+            ssn = '';
+          }
           if (!/^\d{9}$/.test(ssn)) {
             missing.push(`${emp.firstName} ${emp.lastName}`);
             return null;
           }
+          // Per-employee Box 12 array (only entries with code letters; the
+          // route doesn't surface DD aggregation policy — that's set when
+          // the deduction is created on the employer side).
+          const b12 = totals.w2Employees.find((x: any) => x.employeeId === t.employeeId)?.box12 ?? {};
+          const box12 = Object.entries(b12)
+            .filter(([_, cents]) => (cents as number) > 0)
+            .map(([code, cents]) => ({ code, amountCents: cents as number }));
           return {
             ssn,
             firstName: emp.firstName,
@@ -666,22 +868,24 @@ export function registerPayrollRoutes(app: Express, deps: PayrollRouteDeps) {
             wagesCents: t.taxableWagesCents,
             fedIncomeTaxCents: t.fedIncomeTaxCents,
             ssWagesCents: t.ssWagesCents,
-            // Box 4 / Box 6 reflect actual withholding from the run
-            // breakdown — not a recomputation from wages, which would
-            // miss SS cap behavior, rounding, and the 0.9% Add'l
-            // Medicare threshold. Add'l Medicare folds into Box 6 per
-            // IRS Pub 15 (it's still Medicare tax on the W-2).
+            // Add'l Medicare folds into Box 6 per IRS Pub 15.
             ssTaxCents: t.ssTaxCents,
             medicareWagesCents: t.medicareWagesCents,
             medicareTaxCents: t.medicareTaxCents + t.additionalMedicareTaxCents,
+            // Box 10 (dependent-care FSA) — its own W-2 box, sourced from
+            // taxTotals' per-employee aggregate of benefitCategory =
+            // 'fsa_dependent_care' deduction lines. Goes to EFW2 RW
+            // position 270-280 and sums into the RT total record.
+            dependentCareCents: t.dependentCareCents ?? 0,
+            box12,
           };
         })
         .filter((e: Efw2Employee | null): e is Efw2Employee => e !== null);
       if (missing.length > 0) {
         return res.status(400).json({
           message:
-            `Missing full 9-digit SSN for ${missing.length} W-2 employee(s): ${missing.join(', ')}. ` +
-            `Supply them via the request body { fullSsns: { [employeeId]: "123456789" } }. ` +
+            `Missing encrypted SSN for ${missing.length} W-2 employee(s): ${missing.join(', ')}. ` +
+            `Open each person's payroll record, set their full SSN, and retry. ` +
             `EFW2 will not synthesize SSNs from stored last-4 values.`,
           missingEmployees: missing,
         });
@@ -691,15 +895,77 @@ export function registerPayrollRoutes(app: Express, deps: PayrollRouteDeps) {
           message: 'No W-2 employees in scope for the requested year.',
         });
       }
-      // Default employer info from the ACH originator profile if not supplied.
+
+      // Load BSO User ID + vendor code from tenant settings; body overrides.
+      const bsoUserId = body.submitter?.userId
+        ?? await storage.getTenantSettingValue(tenantId, TENANT_KEY_BSO_USER_ID);
+      const vendorCode = body.submitter?.softwareVendorCode
+        ?? await storage.getTenantSettingValue(tenantId, TENANT_KEY_BSO_VENDOR_CODE);
+      if (!bsoUserId || bsoUserId.length !== 8) {
+        return res.status(400).json({
+          message: 'EFW2 requires a SSA BSO User ID (8 chars). Set it under Payroll → Tax Filing Settings or pass submitter.userId in the request.',
+        });
+      }
+
+      // Submitter / filer fall back to tenant settings 'payroll.filer_*' rows.
+      const filerName = body.submitter?.name
+        ?? await storage.getTenantSettingValue(tenantId, TENANT_KEY_FILER_NAME);
+      const filerAddrRaw = await storage.getTenantSettingValue(tenantId, TENANT_KEY_FILER_ADDRESS);
+      const filerContactRaw = await storage.getTenantSettingValue(tenantId, TENANT_KEY_FILER_CONTACT);
+      const filerAddr = safeJsonParse(filerAddrRaw);
+      const filerContact = safeJsonParse(filerContactRaw);
       const ach = await payrollStorage.getAchOriginator(tenantId);
-      const employer = body.employer ?? (ach ? {
-        ein: ach.companyId.replace(/^1/, ''), // ACH carries '1' + EIN
-        name: ach.companyName,
-        addressLine1: '',
-        city: '',
-        stateCode: '',
-        zip: '',
+      const fallbackEin = ach?.companyId.replace(/^1/, ''); // ACH carries '1' + EIN
+
+      const submitter: typeof body.submitter & { userId: string; ein: string; name: string;
+        addressLine1: string; city: string; stateCode: string; zip: string;
+        contactName: string; contactPhone: string; } = {
+        userId: bsoUserId,
+        ein: body.submitter?.ein || fallbackEin || '',
+        name: body.submitter?.name || filerName || ach?.companyName || '',
+        addressLine1: body.submitter?.addressLine1 || filerAddr.addressLine1 || '',
+        addressLine2: body.submitter?.addressLine2 || filerAddr.addressLine2 || undefined,
+        city: body.submitter?.city || filerAddr.city || '',
+        stateCode: body.submitter?.stateCode || filerAddr.stateCode || '',
+        zip: body.submitter?.zip || filerAddr.zip || '',
+        contactName: body.submitter?.contactName || filerContact.name || '',
+        contactPhone: body.submitter?.contactPhone || filerContact.phone || '',
+        contactEmail: body.submitter?.contactEmail || filerContact.email,
+        softwareVendorCode: vendorCode,
+      };
+      if (!/^\d{9}$/.test((submitter.ein || '').replace(/\D/g, ''))) {
+        return res.status(400).json({
+          message: 'Submitter EIN missing — set the ACH originator profile, the filer info in Payroll → Tax Filing Settings, or pass submitter.ein in the request.',
+        });
+      }
+      // SSA AccuWage rejects an EFW2 file with blank required submitter
+      // fields, so fail closed here with a clear message instead of
+      // emitting an invalid file and returning 200.
+      const submitterRequired: Array<[keyof typeof submitter, string]> = [
+        ['name', 'submitter.name'],
+        ['addressLine1', 'submitter.addressLine1'],
+        ['city', 'submitter.city'],
+        ['stateCode', 'submitter.stateCode'],
+        ['zip', 'submitter.zip'],
+        ['contactName', 'submitter.contactName'],
+        ['contactPhone', 'submitter.contactPhone'],
+      ];
+      const submitterMissing = submitterRequired
+        .filter(([k]) => !String(submitter[k] ?? '').trim())
+        .map(([, label]) => label);
+      if (submitterMissing.length > 0) {
+        return res.status(400).json({
+          message: `EFW2 submitter is missing required fields: ${submitterMissing.join(', ')}. Fill them in under Payroll → Tax Filing Settings or pass them in the request body.`,
+          missingFields: submitterMissing,
+        });
+      }
+      const employer = body.employer ?? (fallbackEin ? {
+        ein: fallbackEin,
+        name: ach!.companyName,
+        addressLine1: filerAddr.addressLine1 || '',
+        city: filerAddr.city || '',
+        stateCode: filerAddr.stateCode || '',
+        zip: filerAddr.zip || '',
       } : null);
       if (!employer) {
         return res.status(400).json({
@@ -708,7 +974,7 @@ export function registerPayrollRoutes(app: Express, deps: PayrollRouteDeps) {
       }
       const file = buildEfw2File({
         taxYear: body.year,
-        submitter: body.submitter,
+        submitter,
         employer,
         employees: efw2Employees,
       });
@@ -719,23 +985,24 @@ export function registerPayrollRoutes(app: Express, deps: PayrollRouteDeps) {
   });
 
   // ---- E-file: IRS FIRE 1099-NEC ------------------------------------------
-  // Generates the fixed-width 750-char FIRE file for 1099-NEC. Requires
-  // the filer's IRS-issued TCC (Transmitter Control Code).
+  // Generates the fixed-width 750-char FIRE file for 1099-NEC. TCC and
+  // filer info default to tenant settings (same keys used by EFW2); the
+  // body can override per-call.
   const fireBody = z.object({
     year: z.coerce.number().int(),
     transmitter: z.object({
-      tcc: z.string().length(5),
-      tin: z.string(),
-      name: z.string(),
-      addressLine1: z.string(),
-      city: z.string(),
-      stateCode: z.string().length(2),
-      zip: z.string(),
-      contactName: z.string(),
-      contactPhone: z.string(),
+      tcc: z.string().length(5).optional(),
+      tin: z.string().optional(),
+      name: z.string().optional(),
+      addressLine1: z.string().optional(),
+      city: z.string().optional(),
+      stateCode: z.string().length(2).optional(),
+      zip: z.string().optional(),
+      contactName: z.string().optional(),
+      contactPhone: z.string().optional(),
       contactEmail: z.string().optional(),
       testFile: z.boolean().optional(),
-    }),
+    }).partial().optional(),
     payer: z.object({
       tin: z.string(),
       nameControl: z.string().max(4).optional(),
@@ -757,12 +1024,11 @@ export function registerPayrollRoutes(app: Express, deps: PayrollRouteDeps) {
       );
       const employees = await payrollStorage.listEmployees(tenantId, true);
       const empById = new Map(employees.map(e => [e.id, e]));
-      // Full TIN per contractor must come from their W-9 — the route
-      // accepts a `tins` map keyed by employeeId so the caller wires in
-      // whatever source of record holds the W-9 data. tinType: 1 = EIN,
-      // 2 = SSN, 3 = unknown (don't use). Refuse to synthesize a TIN
-      // from stored last-4; IRS FIRE rejects mismatches and penalties run
-      // $310/return.
+      // Per-contractor TIN comes from the encrypted ssn_enc column. Caller
+      // can still pass `tins[id] = { tin, tinType }` to override (e.g. when
+      // the contractor's EIN lives somewhere other than ssn_enc). When
+      // ssn_enc is present we assume an SSN (tinType 2); pass an explicit
+      // override to mark it as an EIN.
       const tins: Record<string, { tin: string; tinType: 1 | 2 | 3 }> =
         (req.body?.tins ?? {}) as any;
       const missing: string[] = [];
@@ -773,14 +1039,26 @@ export function registerPayrollRoutes(app: Express, deps: PayrollRouteDeps) {
           // 1099 thresholds: skip recipients under $600 NEC for the year.
           if (r.grossCents < 60000) return null;
           const supplied = tins[r.employeeId];
-          const tin = String(supplied?.tin ?? '').replace(/\D/g, '');
-          if (!/^\d{9}$/.test(tin) || !supplied?.tinType || supplied.tinType === 3) {
+          let tin = '';
+          let tinType: 1 | 2 | 3 = 2;
+          if (supplied?.tin && /\d/.test(supplied.tin)) {
+            tin = String(supplied.tin).replace(/\D/g, '');
+            tinType = supplied.tinType ?? 2;
+          } else {
+            try {
+              tin = (decryptString((emp as any).ssnEnc ?? null) ?? '').replace(/\D/g, '');
+            } catch {
+              tin = '';
+            }
+            tinType = 2; // SSN by default; pass tins[] override for EIN
+          }
+          if (!/^\d{9}$/.test(tin) || tinType === 3) {
             missing.push(`${emp.firstName} ${emp.lastName}`);
             return null;
           }
           return {
             tin,
-            tinType: supplied.tinType,
+            tinType,
             name: `${emp.firstName} ${emp.lastName}`,
             addressLine1: emp.homeAddress ?? '',
             city: emp.homeCity ?? '',
@@ -795,7 +1073,7 @@ export function registerPayrollRoutes(app: Express, deps: PayrollRouteDeps) {
         return res.status(400).json({
           message:
             `Missing W-9 TIN for ${missing.length} contractor(s) above the $600 threshold: ${missing.join(', ')}. ` +
-            `Supply them via { tins: { [employeeId]: { tin: "123456789", tinType: 1|2 } } }. ` +
+            `Set a full SSN on the payroll record, or pass { tins: { [employeeId]: { tin: "123456789", tinType: 1|2 } } } in the body. ` +
             `FIRE will not synthesize TINs from stored last-4 values.`,
           missingContractors: missing,
         });
@@ -806,13 +1084,65 @@ export function registerPayrollRoutes(app: Express, deps: PayrollRouteDeps) {
         });
       }
       const ach = await payrollStorage.getAchOriginator(tenantId);
-      const payer = body.payer ?? (ach ? {
-        tin: ach.companyId.replace(/^1/, ''),
-        name: ach.companyName,
-        addressLine1: '',
-        city: '',
-        stateCode: '',
-        zip: '',
+      const fallbackEin = ach?.companyId.replace(/^1/, '');
+      const filerName = await storage.getTenantSettingValue(tenantId, TENANT_KEY_FILER_NAME);
+      const filerAddrRaw = await storage.getTenantSettingValue(tenantId, TENANT_KEY_FILER_ADDRESS);
+      const filerContactRaw = await storage.getTenantSettingValue(tenantId, TENANT_KEY_FILER_CONTACT);
+      const filerAddr = safeJsonParse(filerAddrRaw);
+      const filerContact = safeJsonParse(filerContactRaw);
+      const tcc = body.transmitter?.tcc
+        ?? await storage.getTenantSettingValue(tenantId, TENANT_KEY_IRS_TCC);
+      if (!tcc || tcc.length !== 5) {
+        return res.status(400).json({
+          message: 'FIRE requires an IRS Transmitter Control Code (TCC, 5 chars). Set it under Payroll → Tax Filing Settings or pass transmitter.tcc in the request.',
+        });
+      }
+      const transmitter = {
+        tcc,
+        tin: body.transmitter?.tin || fallbackEin || '',
+        name: body.transmitter?.name || filerName || ach?.companyName || '',
+        addressLine1: body.transmitter?.addressLine1 || filerAddr.addressLine1 || '',
+        city: body.transmitter?.city || filerAddr.city || '',
+        stateCode: body.transmitter?.stateCode || filerAddr.stateCode || '',
+        zip: body.transmitter?.zip || filerAddr.zip || '',
+        contactName: body.transmitter?.contactName || filerContact.name || '',
+        contactPhone: body.transmitter?.contactPhone || filerContact.phone || '',
+        contactEmail: body.transmitter?.contactEmail || filerContact.email,
+        testFile: body.transmitter?.testFile,
+      };
+      if (!/^\d{9}$/.test((transmitter.tin || '').replace(/\D/g, ''))) {
+        return res.status(400).json({
+          message: 'Transmitter TIN missing — set the ACH originator profile, filer info, or pass transmitter.tin in the request.',
+        });
+      }
+      // IRS FIRE rejects a file with blank required transmitter fields.
+      // Fail closed with a clear message instead of generating an
+      // invalid file.
+      const transmitterRequired: Array<[keyof typeof transmitter, string]> = [
+        ['name', 'transmitter.name'],
+        ['addressLine1', 'transmitter.addressLine1'],
+        ['city', 'transmitter.city'],
+        ['stateCode', 'transmitter.stateCode'],
+        ['zip', 'transmitter.zip'],
+        ['contactName', 'transmitter.contactName'],
+        ['contactPhone', 'transmitter.contactPhone'],
+      ];
+      const transmitterMissing = transmitterRequired
+        .filter(([k]) => !String(transmitter[k] ?? '').trim())
+        .map(([, label]) => label);
+      if (transmitterMissing.length > 0) {
+        return res.status(400).json({
+          message: `FIRE transmitter is missing required fields: ${transmitterMissing.join(', ')}. Fill them in under Payroll → Tax Filing Settings or pass them in the request body.`,
+          missingFields: transmitterMissing,
+        });
+      }
+      const payer = body.payer ?? (fallbackEin ? {
+        tin: fallbackEin,
+        name: ach!.companyName,
+        addressLine1: filerAddr.addressLine1 || '',
+        city: filerAddr.city || '',
+        stateCode: filerAddr.stateCode || '',
+        zip: filerAddr.zip || '',
       } : null);
       if (!payer) {
         return res.status(400).json({
@@ -821,7 +1151,7 @@ export function registerPayrollRoutes(app: Express, deps: PayrollRouteDeps) {
       }
       const file = buildFire1099NecFile({
         taxYear: body.year,
-        transmitter: body.transmitter,
+        transmitter,
         payer,
         payees,
       });

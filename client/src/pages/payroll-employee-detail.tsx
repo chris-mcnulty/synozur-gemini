@@ -17,7 +17,7 @@ export default function PayrollEmployeeDetail() {
   const { toast } = useToast();
   const { data, isLoading } = useQuery<any>({ queryKey: ["/api/payroll/employees", id] });
   const [comp, setComp] = useState<any>({ compType: 'salary', amountCents: 0, effectiveFrom: new Date().toISOString().slice(0, 10) });
-  const [ded, setDed] = useState<any>({ deductionType: 'pre_tax', preTaxScope: 'federal_only', name: '', amountCents: 0, effectiveFrom: new Date().toISOString().slice(0, 10), isActive: true });
+  const [ded, setDed] = useState<any>({ deductionType: 'pre_tax', preTaxScope: 'federal_only', benefitCategory: '', box12Code: '', name: '', amountCents: 0, effectiveFrom: new Date().toISOString().slice(0, 10), isActive: true });
 
   const addComp = useMutation({
     mutationFn: (body: any) => apiRequest(`/api/payroll/employees/${id}/compensation`, { method: "POST", body: JSON.stringify(body) }),
@@ -70,7 +70,6 @@ export default function PayrollEmployeeDetail() {
                 return Math.round(Number(v) * 100);
               };
               const body: any = {
-                ssnLast4: fd.get('ssnLast4') || null,
                 homeAddress: fd.get('homeAddress') || null,
                 homeCity: fd.get('homeCity') || null,
                 homeStateCode: (fd.get('homeStateCode') as string || '').toUpperCase() || null,
@@ -88,10 +87,21 @@ export default function PayrollEmployeeDetail() {
               const acct = fd.get('bankAccountNumber') as string;
               // Empty means "don't change", to preserve the encrypted value.
               if (acct && acct.trim()) body.bankAccountNumberEnc = acct.trim();
+              // Full SSN goes through the dedicated ssnFull field so the
+              // server encrypts it into ssn_enc + derives ssn_last4. Empty
+              // means "don't change" so legacy last-4-only rows stay intact.
+              const ssnFull = (fd.get('ssnFull') as string || '').trim();
+              if (ssnFull) body.ssnFull = ssnFull;
               patchEmp.mutate(body);
             }}>
               <div className="grid grid-cols-2 gap-3">
-                <div><Label>SSN last 4</Label><Input name="ssnLast4" maxLength={4} defaultValue={e.ssnLast4 ?? ''} /></div>
+                <div>
+                  <Label>Full SSN{e.hasFullSsn ? ' (replace)' : ''}</Label>
+                  <Input name="ssnFull" maxLength={11} placeholder={e.hasFullSsn ? `On file: ***-**-${e.ssnLast4 ?? '????'} — leave blank to keep` : 'Required for EFW2 / FIRE e-file'} />
+                  <p className="text-xs text-muted-foreground mt-1">
+                    Stored AES-256-GCM encrypted. Never echoed back to the UI. Last 4 ({e.ssnLast4 ?? 'unset'}) shown for audit.
+                  </p>
+                </div>
                 <div><Label>Filing status</Label>
                   <Select name="filingStatus" defaultValue={e.filingStatus ?? 'single'}>
                     <SelectTrigger><SelectValue /></SelectTrigger>
@@ -180,13 +190,14 @@ export default function PayrollEmployeeDetail() {
           <CardContent className="space-y-4">
             <table className="w-full text-sm">
               <thead className="text-left text-muted-foreground border-b">
-                <tr><th className="py-2">Name</th><th>Type</th><th>Amount</th><th>% of gross</th><th></th></tr>
+                <tr><th className="py-2">Name</th><th>Type</th><th>Box 12</th><th>Amount</th><th>% of gross</th><th></th></tr>
               </thead>
               <tbody>
                 {data.deductions.map((d: any) => (
                   <tr key={d.id} className="border-b last:border-0">
                     <td className="py-2">{d.name}</td>
-                    <td>{d.deductionType}</td>
+                    <td>{d.deductionType}{d.preTaxScope === 'all' ? ' · §125' : ''}</td>
+                    <td>{d.box12Code ? <span className="px-1.5 py-0.5 text-xs rounded bg-blue-100 dark:bg-blue-900/40">{d.box12Code}</span> : '—'}</td>
                     <td>{d.amountCents ? fmtMoney(d.amountCents) : '—'}</td>
                     <td>{d.percentOfGross ? `${d.percentOfGross}%` : '—'}</td>
                     <td className="text-right"><Button size="icon" variant="ghost" onClick={() => delDed.mutate(d.id)}><Trash2 className="h-4 w-4" /></Button></td>
@@ -195,7 +206,38 @@ export default function PayrollEmployeeDetail() {
               </tbody>
             </table>
             <div className="grid grid-cols-6 gap-3 items-end pt-3 border-t">
-              <div><Label>Name</Label><Input value={ded.name} onChange={ev => setDed({ ...ded, name: ev.target.value })} /></div>
+              <div className="col-span-2"><Label>Name</Label><Input value={ded.name} onChange={ev => setDed({ ...ded, name: ev.target.value })} placeholder="e.g. HSA contribution" /></div>
+              <div><Label>Benefit preset</Label>
+                <Select value={ded.benefitCategory || 'other'} onValueChange={(v) => {
+                  // Picking a benefit preset also auto-fills the tax wrapper +
+                  // Box 12 code so admins don't have to remember IRS letters.
+                  // 'other' clears the preset and leaves manual control to the
+                  // raw Type / Box 12 fields below.
+                  const next: any = { ...ded, benefitCategory: v === 'other' ? '' : v };
+                  if (v === 'hsa')                     { next.deductionType = 'pre_tax';  next.preTaxScope = 'all';          next.box12Code = 'W'; }
+                  else if (v === 'health')             { next.deductionType = 'pre_tax';  next.preTaxScope = 'all';          next.box12Code = ''; }
+                  else if (v === 'fsa_health')         { next.deductionType = 'pre_tax';  next.preTaxScope = 'all';          next.box12Code = ''; }
+                  // Dependent-care FSA goes in W-2 Box 10, NOT Box 12.
+                  // Routing is driven by benefitCategory; leave box12Code empty.
+                  else if (v === 'fsa_dependent_care') { next.deductionType = 'pre_tax';  next.preTaxScope = 'all';          next.box12Code = ''; }
+                  else if (v === 'retirement_401k')    { next.deductionType = 'pre_tax';  next.preTaxScope = 'federal_only'; next.box12Code = 'D'; }
+                  else if (v === 'retirement_roth_401k'){ next.deductionType = 'post_tax';                                    next.box12Code = 'AA'; }
+                  else if (v === 'section_125_other')  { next.deductionType = 'pre_tax';  next.preTaxScope = 'all';          next.box12Code = ''; }
+                  setDed(next);
+                }}>
+                  <SelectTrigger data-testid="select-benefit-preset"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="other">Other / manual</SelectItem>
+                    <SelectItem value="hsa">HSA (§125, Box 12 W)</SelectItem>
+                    <SelectItem value="health">Health premium (§125)</SelectItem>
+                    <SelectItem value="fsa_health">FSA medical (§125)</SelectItem>
+                    <SelectItem value="fsa_dependent_care">FSA dependent care (Box 10)</SelectItem>
+                    <SelectItem value="retirement_401k">401(k) traditional (Box 12 D)</SelectItem>
+                    <SelectItem value="retirement_roth_401k">Roth 401(k) (Box 12 AA)</SelectItem>
+                    <SelectItem value="section_125_other">Other §125</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
               <div><Label>Type</Label>
                 <Select value={ded.deductionType} onValueChange={v => setDed({ ...ded, deductionType: v })}>
                   <SelectTrigger><SelectValue /></SelectTrigger>
@@ -218,6 +260,7 @@ export default function PayrollEmployeeDetail() {
                   </Select>
                 </div>
               )}
+              <div><Label>Box 12 code</Label><Input maxLength={2} value={ded.box12Code || ''} onChange={ev => setDed({ ...ded, box12Code: ev.target.value.toUpperCase() })} placeholder="W, D, AA…" /></div>
               <div><Label>Amount (USD)</Label><Input type="number" step="0.01" onChange={ev => setDed({ ...ded, amountCents: ev.target.value ? Math.round(Number(ev.target.value) * 100) : null })} /></div>
               <div><Label>% gross</Label><Input type="number" step="0.01" onChange={ev => setDed({ ...ded, percentOfGross: ev.target.value || null })} /></div>
               <div><Button onClick={() => addDed.mutate(ded)} disabled={addDed.isPending || !ded.name}>Add</Button></div>

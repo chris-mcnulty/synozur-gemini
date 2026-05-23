@@ -49,6 +49,12 @@ export interface PayrollLine {
   category: string;
   label: string;
   amountCents: number;
+  // W-2 Box 12 code stamped onto pre-tax / post-tax deduction lines whose
+  // underlying payroll_deductions row carries one (W = HSA, D = 401(k)
+  // traditional, AA = Roth 401(k), etc.). Lets `taxTotals` aggregate Box 12
+  // totals per employee per year without re-loading deduction rows.
+  box12Code?: string;
+  benefitCategory?: string;
 }
 
 export interface PayrollEngineResult {
@@ -216,7 +222,13 @@ export function computePayroll(inp: PayrollEngineInputs): PayrollEngineResult {
       const scope = (d as any).preTaxScope ?? 'all';
       if (scope === 'all') preTaxAllCents += amt;
       else preTaxFedOnlyCents += amt;
-      lines.push({ category: 'pre_tax_deduction', label: d.name, amountCents: -amt });
+      lines.push({
+        category: 'pre_tax_deduction',
+        label: d.name,
+        amountCents: -amt,
+        box12Code: (d as any).box12Code ?? undefined,
+        benefitCategory: (d as any).benefitCategory ?? undefined,
+      });
     }
   }
   const preTaxCents = preTaxAllCents + preTaxFedOnlyCents;
@@ -410,10 +422,19 @@ export function computePayroll(inp: PayrollEngineInputs): PayrollEngineResult {
   // ---- Post-tax deductions and garnishments ----
   let postTaxCents = 0;
   for (const d of inp.deductions.filter(x => x.isActive && (x.deductionType === 'post_tax' || x.deductionType === 'garnishment'))) {
+    // Box 12 stamp still applies to Roth 401(k) (post-tax, code AA) and a
+    // few other post-tax retirement codes. Engine doesn't care which
+    // letter — it just carries it through to the breakdown.
     const amt = d.amountCents ?? (d.percentOfGross ? pctOfCents(grossCents, Number(d.percentOfGross)) : 0);
     if (amt > 0) {
       postTaxCents += amt;
-      lines.push({ category: d.deductionType, label: d.name, amountCents: -amt });
+      lines.push({
+        category: d.deductionType,
+        label: d.name,
+        amountCents: -amt,
+        box12Code: (d as any).box12Code ?? undefined,
+        benefitCategory: (d as any).benefitCategory ?? undefined,
+      });
     }
   }
 

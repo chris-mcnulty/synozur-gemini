@@ -65,6 +65,17 @@ export interface TaxTotalsInput {
     medicareTaxCents: number;
     additionalMedicareTaxCents: number;
     netPayCents: number;
+    // Box 10 — dependent-care FSA total. Sourced from deductions tagged
+    // with benefitCategory='fsa_dependent_care' in the run breakdown.
+    // Box 10 is its own W-2 box, NOT a Box 12 code, so it lives on its
+    // own field (and gets summed into the EFW2 RT total record).
+    dependentCareCents?: number;
+    // W-2 Box 12 totals for the year, keyed by IRS code letter (W = HSA,
+    // D = 401(k), AA = Roth 401(k), DD = employer-sponsored health cost,
+    // E = 403(b), G = 457, S = SIMPLE). Aggregated from box12Code stamped
+    // on deduction lines in the run breakdown. Empty {} for legacy data
+    // where deductions don't yet carry a code.
+    box12?: Record<string, number>;
   }>;
   form1099Recipients: Array<{
     employeeId: string;
@@ -155,50 +166,91 @@ export function render941Html(opts: {
 </body></html>`;
 }
 
-/** W-2 box totals as CSV. One row per W-2 employee for the calendar year. */
+// Box 12 codes that the W-2 CSV surfaces as dedicated columns. Picked to
+// cover the codes the payroll engine can produce today (HSA, 401(k) family,
+// employer-sponsored health aggregate). Any other Box 12 code on a
+// deduction shows up in the 'Box 12 - other' column as code:amount pairs.
+const BOX12_PRIMARY_CODES = ['W', 'D', 'AA', 'DD'] as const;
+
+/** W-2 box totals as CSV. One row per W-2 employee for the calendar year.
+ *  Box 4 / Box 6 come from the YTD actual withholdings stamped on each
+ *  run-item breakdown — wages × 6.2% / 1.45% would miss the Social
+ *  Security cap, rounding drift, and the 0.9% Additional Medicare
+ *  surcharge (which folds into Box 6 per IRS Pub 15). Box 10 carries
+ *  the year's dependent-care FSA total. */
 export function renderW2Csv(input: TaxTotalsInput): string {
   const header = [
     'Employee ID', 'Name', 'Email',
     'Box 1 - Wages',
     'Box 2 - Fed Income Tax',
     'Box 3 - SS Wages',
-    'Box 4 - SS Tax (6.2%)',
+    'Box 4 - SS Tax (actual)',
     'Box 5 - Medicare Wages',
-    'Box 6 - Medicare Tax (1.45%)',
+    'Box 6 - Medicare Tax (actual + add\'l)',
+    'Box 10 - Dependent Care',
+    'Box 12 W - HSA',
+    'Box 12 D - 401(k)',
+    'Box 12 AA - Roth 401(k)',
+    'Box 12 DD - Employer Health',
+    'Box 12 - Other',
   ].join(',');
-  const rows = input.w2Employees.map(e => [
-    e.employeeId, e.name, e.email ?? '',
-    usd(e.taxableWagesCents),
-    usd(e.fedIncomeTaxCents),
-    usd(e.ssWagesCents),
-    usd(Math.round(e.ssWagesCents * 0.062)),
-    usd(e.medicareWagesCents),
-    usd(Math.round(e.medicareWagesCents * 0.0145)),
-  ].map(csvEsc).join(','));
+  const rows = input.w2Employees.map(e => {
+    const b12 = e.box12 ?? {};
+    const other = Object.entries(b12)
+      .filter(([code]) => !BOX12_PRIMARY_CODES.includes(code as any))
+      .map(([code, cents]) => `${code}:${usd(cents)}`)
+      .join('; ');
+    // Box 6 = regular Medicare + Additional Medicare (0.9% surcharge above
+    // $200K single / $250K MFJ). Both come from the run breakdown.
+    const box6 = e.medicareTaxCents + (e.additionalMedicareTaxCents ?? 0);
+    return [
+      e.employeeId, e.name, e.email ?? '',
+      usd(e.taxableWagesCents),
+      usd(e.fedIncomeTaxCents),
+      usd(e.ssWagesCents),
+      usd(e.ssTaxCents),
+      usd(e.medicareWagesCents),
+      usd(box6),
+      usd(e.dependentCareCents ?? 0),
+      usd(b12.W ?? 0),
+      usd(b12.D ?? 0),
+      usd(b12.AA ?? 0),
+      usd(b12.DD ?? 0),
+      other,
+    ].map(csvEsc).join(',');
+  });
   return [header, ...rows].join('\n');
 }
 
 /**
  * W-3 transmittal summary (one row). The W-3 totals across all W-2s for
  * the year; this is the data that goes on the cover sheet sent to SSA.
+ * Tax totals come from the run-breakdown actuals — recomputing
+ * wages × rate would miss the Social Security cap, rounding drift, and
+ * the 0.9% Add'l Medicare surcharge, and would make W-3 disagree with
+ * the underlying W-2 rows.
  */
 export function renderW3Csv(input: TaxTotalsInput): string {
   const totals = input.w2Employees.reduce((acc, e) => ({
     box1: acc.box1 + e.taxableWagesCents,
     box2: acc.box2 + e.fedIncomeTaxCents,
     box3: acc.box3 + e.ssWagesCents,
+    box4: acc.box4 + e.ssTaxCents,
     box5: acc.box5 + e.medicareWagesCents,
+    // Box 6 includes Additional Medicare per IRS Pub 15 — it's still
+    // Medicare tax on the W-2/W-3.
+    box6: acc.box6 + e.medicareTaxCents + (e.additionalMedicareTaxCents ?? 0),
     count: acc.count + 1,
-  }), { box1: 0, box2: 0, box3: 0, box5: 0, count: 0 });
+  }), { box1: 0, box2: 0, box3: 0, box4: 0, box5: 0, box6: 0, count: 0 });
   return [
     'Field,Amount',
     `Number of W-2s,${totals.count}`,
     `Box 1 - Total Wages,${usd(totals.box1)}`,
     `Box 2 - Total Fed Income Tax,${usd(totals.box2)}`,
     `Box 3 - Total SS Wages,${usd(totals.box3)}`,
-    `Box 4 - Total SS Tax,${usd(Math.round(totals.box3 * 0.062))}`,
+    `Box 4 - Total SS Tax,${usd(totals.box4)}`,
     `Box 5 - Total Medicare Wages,${usd(totals.box5)}`,
-    `Box 6 - Total Medicare Tax,${usd(Math.round(totals.box5 * 0.0145))}`,
+    `Box 6 - Total Medicare Tax,${usd(totals.box6)}`,
   ].join('\n');
 }
 

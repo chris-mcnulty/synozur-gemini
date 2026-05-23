@@ -105,6 +105,9 @@ export interface Efw2Submitter {
   contactName: string;
   contactPhone: string;  // digits only, 10
   contactEmail?: string;
+  /** SSA-assigned software vendor code (4 chars). Optional — blank when
+   *  the filer is using their in-house software and has no vendor code. */
+  softwareVendorCode?: string;
 }
 
 export interface Efw2Employer {
@@ -134,7 +137,13 @@ export interface Efw2Employee {
   ssTaxCents: number;          // Box 4
   medicareWagesCents: number;  // Box 5
   medicareTaxCents: number;    // Box 6
-  /** Optional Box 12 entries (e.g., D for 401(k), DD for employer health). */
+  /** Box 10 — dependent-care FSA total. Its own W-2 box, separate from
+   *  Box 12. SSA EFW2 RW position 270-280 carries this amount and the
+   *  RT total record sums it across all RWs. */
+  dependentCareCents?: number;
+  /** Optional Box 12 entries (e.g., D for 401(k), DD for employer health).
+   *  Codes are 1-2 letters per IRS spec; do not pack non-Box-12 amounts
+   *  (Box 10 dependent care, Box 11 nonqualified) into this array. */
   box12?: Array<{ code: string; amountCents: number }>;
 }
 
@@ -146,7 +155,7 @@ function buildRa(s: Efw2Submitter, taxYear: number, resubmitTLCN?: string): stri
   const line =
     'RA' +                                  // 1-2
     fText(s.userId, 8) +                    // 3-10  User ID (BSO)
-    ' '.repeat(4) +                         // 11-14 Software vendor code (assigned by SSA; blank if none)
+    fText(s.softwareVendorCode ?? '', 4) +  // 11-14 Software vendor code (assigned by SSA; blank if none)
     ' '.repeat(5) +                         // 15-19 Blank
     fText('', 1) +                          // 20    Resubmit indicator (0/1)
     fText(resubmitTLCN ?? '', 6) +          // 21-26 Resubmit WFID
@@ -199,6 +208,15 @@ function buildRe(e: Efw2Employer, taxYear: number): string {
 
 /** RW — Employee Wage Record (federal totals). */
 function buildRw(emp: Efw2Employee): string {
+  // Look up Box 12 amounts by IRS code letter. emp.box12 is the per-employee
+  // year aggregate produced by `taxTotals`, keyed by code (W = HSA,
+  // D = 401(k) traditional, AA = Roth 401(k), DD = employer health, etc.).
+  // Codes that don't have a dedicated SSA field slot (DD, W, etc. -- they
+  // belong in RO record, not RW) are written via the RO Optional Record
+  // built below. Box 10 dependent care has its own dedicated slot below
+  // (270-280) and is sourced from emp.dependentCareCents — NOT a Box 12
+  // code.
+  const b12 = (code: string): number => emp.box12?.find(b => b.code === code)?.amountCents ?? 0;
   const line =
     'RW' +                                  // 1-2
     fDigits(emp.ssn, 9) +                   // 3-11 SSN
@@ -223,31 +241,71 @@ function buildRw(emp: Efw2Employee): string {
     fMoney(0, 11) +                         // 237-247 Box 7 SS tips
     fMoney(0, 11) +                         // 248-258 Box 8 Allocated tips
     fMoney(0, 11) +                         // 259-269 Reserved (was advance EIC)
-    fMoney(0, 11) +                         // 270-280 Box 10 Dependent care
+    fMoney(emp.dependentCareCents ?? 0, 11) + // 270-280 Box 10 Dependent care (NOT a Box 12 code)
     fMoney(0, 11) +                         // 281-291 Box 11 Nonqualified plans
-    fMoney(0, 11) +                         // 292-302 Box 12 code D (401(k))
-    fMoney(0, 11) +                         // 303-313 Box 12 code E (403(b))
-    fMoney(0, 11) +                         // 314-324 Box 12 code F
-    fMoney(0, 11) +                         // 325-335 Box 12 code G
-    fMoney(0, 11) +                         // 336-346 Box 12 code H
-    fMoney(0, 11) +                         // 347-357 Box 12 code S (SIMPLE)
-    fMoney(0, 11) +                         // 358-368 Box 12 code Y
-    fMoney(0, 11) +                         // 369-379 Box 12 code AA (Roth 401(k))
-    fMoney(0, 11) +                         // 380-390 Box 12 code BB
-    fMoney(0, 11) +                         // 391-401 Box 12 code EE
-    fMoney(0, 11) +                         // 402-412 Box 12 code GG
-    fMoney(0, 11) +                         // 413-423 Box 12 code HH
+    fMoney(b12('D'), 11) +                  // 292-302 Box 12 code D (401(k))
+    fMoney(b12('E'), 11) +                  // 303-313 Box 12 code E (403(b))
+    fMoney(b12('F'), 11) +                  // 314-324 Box 12 code F
+    fMoney(b12('G'), 11) +                  // 325-335 Box 12 code G
+    fMoney(b12('H'), 11) +                  // 336-346 Box 12 code H
+    fMoney(b12('S'), 11) +                  // 347-357 Box 12 code S (SIMPLE)
+    fMoney(b12('Y'), 11) +                  // 358-368 Box 12 code Y
+    fMoney(b12('AA'), 11) +                 // 369-379 Box 12 code AA (Roth 401(k))
+    fMoney(b12('BB'), 11) +                 // 380-390 Box 12 code BB (Roth 403(b))
+    fMoney(b12('EE'), 11) +                 // 391-401 Box 12 code EE (Roth 457)
+    fMoney(b12('GG'), 11) +                 // 402-412 Box 12 code GG
+    fMoney(b12('HH'), 11) +                 // 413-423 Box 12 code HH
     ' '.repeat(89);                         // 424-512 Filler / box-13 checkboxes
-  // NB: Filer-specific Box 12 codes (D, DD, etc.) are not yet wired through
-  // from the employee input; left as zeros until 401(k) deferrals + health
-  // coverage are exposed in `payrollDeductions`.
   return pad(line, 512);
 }
 
-/** RT — Total Record. Sums every RW above this RE. */
+/** RO — Optional employee wage record. Carries Box 12 codes that don't fit
+ *  RW (notably W = HSA and DD = employer-sponsored health cost) plus a few
+ *  other employee-specific items. Emitted only when the employee has at
+ *  least one of those amounts, since RO is optional per spec. */
+function buildRo(emp: Efw2Employee): string | null {
+  const b12 = (code: string): number => emp.box12?.find(b => b.code === code)?.amountCents ?? 0;
+  const w = b12('W');
+  const dd = b12('DD');
+  const t = b12('T');     // adoption benefits
+  if (!w && !dd && !t) return null;
+  const line =
+    'RO' +                                  // 1-2
+    ' '.repeat(9) +                         // 3-11 Reserved
+    fMoney(0, 11) +                         // 12-22 Allocated tips (already in RW)
+    fMoney(0, 11) +                         // 23-33 Uncollected employee SS tax on tips (code A)
+    fMoney(0, 11) +                         // 34-44 Uncollected Medicare tax on tips (B)
+    fMoney(0, 11) +                         // 45-55 Code M
+    fMoney(0, 11) +                         // 56-66 Code N
+    fMoney(0, 11) +                         // 67-77 Code P (moving)
+    fMoney(0, 11) +                         // 78-88 Code Q (combat pay)
+    fMoney(0, 11) +                         // 89-99 Code R (Archer MSA)
+    fMoney(t, 11) +                         // 100-110 Code T (adoption benefits)
+    fMoney(0, 11) +                         // 111-121 Code V (NQSO income)
+    fMoney(w, 11) +                         // 122-132 Code W (HSA)
+    fMoney(0, 11) +                         // 133-143 Code Y
+    fMoney(0, 11) +                         // 144-154 Code Z
+    fMoney(dd, 11) +                        // 155-165 Code DD (employer health)
+    fMoney(0, 11) +                         // 166-176 Code FF (small-employer health reimb arrangement)
+    ' '.repeat(336);                        // 177-512 Filler
+  return pad(line, 512);
+}
+
+/** RT — Total Record. Sums every RW above this RE. The dependent-care
+ *  and deferred-compensation totals must agree with the per-employee
+ *  amounts on the RW lines or SSA AccuWage flags the file as
+ *  inconsistent. */
 function buildRt(employees: Efw2Employee[]): string {
   const sum = (k: keyof Efw2Employee) =>
     employees.reduce((acc, e) => acc + (typeof e[k] === 'number' ? (e[k] as number) : 0), 0);
+  // Sum Box 12 deferral codes (D = 401(k), E = 403(b), F = 408(k)(6),
+  // G = 457, H = 501(c)(18)(D), S = SIMPLE, AA = Roth 401(k),
+  // BB = Roth 403(b), EE = Roth 457) for the deferred-comp total field.
+  const sumBox12 = (codes: readonly string[]) => employees.reduce((acc, e) => {
+    const yr = e.box12 ?? [];
+    return acc + codes.reduce((s, c) => s + (yr.find(b => b.code === c)?.amountCents ?? 0), 0);
+  }, 0);
+  const deferredCodes = ['D', 'E', 'F', 'G', 'H', 'S', 'AA', 'BB', 'EE'] as const;
   const line =
     'RT' +                                  // 1-2
     fNum(employees.length, 7) +             // 3-9 Number of RWs
@@ -260,9 +318,9 @@ function buildRt(employees: Efw2Employee[]): string {
     fMoney(0, 15) +                         // 100-114 SS tips
     fMoney(0, 15) +                         // 115-129 Allocated tips
     fMoney(0, 15) +                         // 130-144 Reserved
-    fMoney(0, 15) +                         // 145-159 Dependent care
+    fMoney(sum('dependentCareCents'), 15) + // 145-159 Dependent care (sums RW Box 10)
     fMoney(0, 15) +                         // 160-174 Nonqualified plans
-    fMoney(0, 15) +                         // 175-189 Deferred compensation total
+    fMoney(sumBox12(deferredCodes), 15) +   // 175-189 Deferred compensation total
     ' '.repeat(308);                        // 190-512 Filler
   return pad(line, 512);
 }
@@ -318,7 +376,11 @@ export function buildEfw2File(input: Efw2FileInput): string {
   const records: string[] = [];
   records.push(buildRa(input.submitter, input.taxYear, input.resubmitTLCN));
   records.push(buildRe(input.employer, input.taxYear));
-  for (const e of input.employees) records.push(buildRw(e));
+  for (const e of input.employees) {
+    records.push(buildRw(e));
+    const ro = buildRo(e);
+    if (ro) records.push(ro);
+  }
   records.push(buildRt(input.employees));
   records.push(buildRf(input.employees.length));
   return records.join(CRLF) + CRLF;
