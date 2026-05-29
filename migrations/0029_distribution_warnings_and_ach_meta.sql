@@ -1,4 +1,4 @@
--- Follow-up to migration 0024 addressing two Copilot PR review comments:
+-- Follow-up to migration 0028 addressing two Copilot PR review comments:
 --
 --   1. Preview warnings were only held in React state, so a refresh or a
 --      visit to an already-previewed run dropped them. Persist them on the

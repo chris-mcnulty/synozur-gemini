@@ -9,7 +9,7 @@
 
 Drawn from the May 20 planning conversation. Ordered by risk-to-ship.
 
-1. ✅ **SSA EFW2 + IRS FIRE e-file** — first cut in `tax-forms-efile.ts` (May 20). Migration 0026 adds encrypted full SSN storage (`payroll_employees.ssn_enc`); BSO User ID + IRS TCC + software vendor code now live in tenant settings (`payroll.bso_user_id`, `payroll.irs_tcc`, `payroll.software_vendor_code`) surfaced via Payroll → Tax filing settings. EFW2 / FIRE routes pull SSN from the encrypted column and the filer info from tenant settings — `fullSsns` request-body workaround removed. EFW2 RO record added so Box 12 W (HSA) + DD (employer health) actually surface. Still pending: SSA AccuWage + IRS FIRE-test validation before any production submission.
+1. ✅ **SSA EFW2 + IRS FIRE e-file** — first cut in `tax-forms-efile.ts` (May 20). Migration 0030 adds encrypted full SSN storage (`payroll_employees.ssn_enc`); BSO User ID + IRS TCC + software vendor code now live in tenant settings (`payroll.bso_user_id`, `payroll.irs_tcc`, `payroll.software_vendor_code`) surfaced via Payroll → Tax filing settings. EFW2 / FIRE routes pull SSN from the encrypted column and the filer info from tenant settings — `fullSsns` request-body workaround removed. EFW2 RO record added so Box 12 W (HSA) + DD (employer health) actually surface. Still pending: SSA AccuWage + IRS FIRE-test validation before any production submission.
 2. ✅ **941 PDF via Puppeteer** — `/api/payroll/tax-forms/941?format=pdf` returns a Letter-size PDF rendered through the same puppeteer pipeline used by invoicing. HTML output preserved as the default.
 3. **State withholding matrix — next 10 states** (TX, MA, IL, GA, NC, VA, OH, WA-PFML/Cares ✅, CO, MN, MI). Bracket data only; engine is ready.
 4. ✅ **SUTA experience-rate tenant override UI** — new Payroll → SUTA / Jurisdictions admin page lets tenants override the seeded new-employer rate (and optionally wage base) per state. `POST /api/payroll/jurisdictions` upserts the tenant row; `DELETE /api/payroll/jurisdictions/:id` reverts to the platform default.
@@ -92,13 +92,13 @@ The current sweep closes the highest-impact gaps; remaining items below.
 - [x] Form 941 + Schedule B printable HTML; W-2 / W-3 / 1099-NEC CSVs (artifact-only, not e-file)
 
 **Remaining P1 (in priority order):**
-- [ ] **State withholding matrix beyond CA/NY/NJ/PA/WA** — bracket tables for the next ~10 states by headcount (TX has no state income tax; covers MA, IL, GA, NC, VA, OH, CO, MN, MI). Existing engine `kind: 'brackets'` is ready; just need data. WA seeded in 0023 (PFML + Cares as `wage_premium`).
-- [ ] **State-specific SUTA experience rates** — platform seeds the new-employer rate per state; tenants need a UI to override with the experience-rated percentage their state assigned. SUTA-WA seeded in 0023.
+- [ ] **State withholding matrix beyond CA/NY/NJ/PA/WA** — bracket tables for the next ~10 states by headcount (TX has no state income tax; covers MA, IL, GA, NC, VA, OH, CO, MN, MI). Existing engine `kind: 'brackets'` is ready; just need data. WA seeded in 0027 (PFML + Cares as `wage_premium`).
+- [ ] **State-specific SUTA experience rates** — platform seeds the new-employer rate per state; tenants need a UI to override with the experience-rated percentage their state assigned. SUTA-WA seeded in 0027.
 - [x] **SSA EFW2 + IRS FIRE e-file (first cut)** — fixed-width file generators in `server/services/tax-forms-efile.ts`; routes `POST /api/payroll/tax-forms/w2-efw2` and `POST /api/payroll/tax-forms/1099-nec-fire`. **Validate against SSA AccuWage and IRS FIRE-test before production filing.** Open follow-ups:
-  - [x] Full SSN storage — migration 0026 adds `payroll_employees.ssn_enc` (AES-256-GCM); employee detail UI now has a write-only "Full SSN" field; EFW2 + FIRE pull from the encrypted column.
+  - [x] Full SSN storage — migration 0030 adds `payroll_employees.ssn_enc` (AES-256-GCM); employee detail UI now has a write-only "Full SSN" field; EFW2 + FIRE pull from the encrypted column.
   - [x] Tenant settings: BSO User ID, IRS TCC, software vendor code — `payroll.bso_user_id`, `payroll.irs_tcc`, `payroll.software_vendor_code` + filer name/address/contact under Payroll → Tax filing settings.
   - 1099-DIV variant for owner distributions if the entity elects C-corp.
-- [ ] **Washington state coverage** — PFML, Cares, SUTA-WA, L&I stub seeded in migration 0023. Remaining: WA L&I hours-based premium engine (needs `risk_class_code` on payroll_employees + per-class rate table); WA B&O accrual on the AR side (see `docs/design/quarterly-profit-distribution.md` §7).
+- [ ] **Washington state coverage** — PFML, Cares, SUTA-WA, L&I stub seeded in migration 0027. Remaining: WA L&I hours-based premium engine (needs `risk_class_code` on payroll_employees + per-class rate table); WA B&O accrual on the AR side (see `docs/design/quarterly-profit-distribution.md` §7).
 - [x] **941 PDF via Puppeteer** — `/api/payroll/tax-forms/941?format=pdf` returns a Letter-size PDF via the shared `htmlToPdf` helper.
 - [x] **Off-cycle / bonus run UX** — bonus run type + employee multi-select picker live; `payroll_runs.target_employee_ids` persists the subset and bypasses the pay-schedule filter in `previewRun`.
 - [ ] **Per-period accruals other than PTO** — sick leave, parental leave, jury duty caps.
@@ -106,7 +106,7 @@ The current sweep closes the highest-impact gaps; remaining items below.
 - [ ] **Payment cycle SLA monitoring** — alert when a scheduled run has not been previewed/approved within N days of pay date.
 - [ ] **Audit log retention + export** — currently append-only with no retention policy or exportable evidence package.
 - [ ] **Per diem accountable vs non-accountable split** — when per diem exceeds the federal rate, the spillover is taxable wages; current reimbursement path treats everything as accountable.
-- [x] **HSA / health benefit reimbursements** — `payroll_deductions.box12_code` + `benefit_category` columns + engine pass-through + W-2 CSV / EFW2 RW+RO Box 12 emission + admin "Benefit preset" picker shipped (migration 0026).
+- [x] **HSA / health benefit reimbursements** — `payroll_deductions.box12_code` + `benefit_category` columns + engine pass-through + W-2 CSV / EFW2 RW+RO Box 12 emission + admin "Benefit preset" picker shipped (migration 0030).
 
 ---
 
@@ -434,7 +434,7 @@ quarterly distributions plus an FTE profit-sharing pool. Backend covers
 the entire run lifecycle (draft → previewed → approved → finalized →
 reversed); UI surface is the only remaining gap.
 
-- [x] Schema: `entity_owners`, `distribution_policy`, `distribution_runs`, `distribution_lines` (migration 0024)
+- [x] Schema: `entity_owners`, `distribution_policy`, `distribution_runs`, `distribution_lines` (migration 0028)
 - [x] `is_owner` flag on `payroll_employees` so owner-employees don't double-dip in FTE pool
 - [x] Available-funds engine (cash-basis: revenue collected − non-reimbursable opex − payroll burden − tax reserve − operating reserve − WA B&O accrual)
 - [x] Owner pool allocation by ownership percent (with penny-drift sweep into largest share)

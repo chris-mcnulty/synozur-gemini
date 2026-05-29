@@ -9,3 +9,25 @@ certs/
 *.key
 *.crt
 attached_assets/
+
+# Runtime-uploaded files (client documents/PII) — never commit; keep dirs only
+/uploads/*
+!/uploads/contracts/
+!/uploads/invoices/
+!/uploads/receipts/
+!/uploads/expenses/
+/uploads/contracts/*
+!/uploads/contracts/.gitkeep
+/uploads/invoices/*
+!/uploads/invoices/.gitkeep
+/uploads/receipts/*
+!/uploads/receipts/.gitkeep
+/uploads/expenses/*
+!/uploads/expenses/.gitkeep
+
+# Scratch / never commit
+*.jar
+cookies.txt
+backup_*.sql
+*.session
+seddFlNoS
