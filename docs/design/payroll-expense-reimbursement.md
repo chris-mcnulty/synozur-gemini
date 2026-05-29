@@ -9,7 +9,7 @@
 
 The following from this design is live:
 
-- Schema (migration 0020): `expenses.payroll_run_item_id`,
+- Schema (migration 0024): `expenses.payroll_run_item_id`,
   `expenses.payroll_reimbursed_at`, `payroll_run_items.reimbursement_cents`,
   table `payroll_reimbursement_lines`.
 - Engine (`computePayroll`): new `reimbursementCents` input added to net
@@ -252,7 +252,7 @@ A tenant setting `payrollReimbursementMode` ∈ `{auto, opt_in, off}` controls t
 ## 10. Migration
 
 ```sql
--- 0020_payroll_expense_reimbursement.sql
+-- 0024_payroll_expense_reimbursement.sql
 ALTER TABLE expenses
   ADD COLUMN payroll_run_item_id varchar REFERENCES payroll_run_items(id) ON DELETE SET NULL,
   ADD COLUMN payroll_reimbursed_at timestamp;

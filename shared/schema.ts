@@ -4817,7 +4817,7 @@ export const entityOwners = pgTable("entity_owners", {
   updatedAt: timestamp("updated_at").notNull().default(sql`now()`),
 }, (t) => ({
   tenantIdx: index("idx_entity_owners_tenant").on(t.tenantId, t.effectiveFrom),
-  // Mirror the partial unique index in migration 0024 so Drizzle sees the
+  // Mirror the partial unique index in migration 0028 so Drizzle sees the
   // same constraint as Postgres: at most one active (effective_to IS NULL)
   // owner row per (tenant, user). Prevents accidental duplicate active
   // owners from sneaking past app-layer checks.
@@ -4891,7 +4891,7 @@ export const distributionRuns = pgTable("distribution_runs", {
   createdAt: timestamp("created_at").notNull().default(sql`now()`),
 }, (t) => ({
   tenantIdx: index("idx_distribution_runs_tenant").on(t.tenantId, t.periodEnd),
-  // Mirror the partial unique index in migration 0024: only one live
+  // Mirror the partial unique index in migration 0028: only one live
   // (non-reversed, non-draft) run per quarter. Drafts are excluded so the
   // idempotent create endpoint can return an existing draft instead of
   // 409; reversed runs are excluded so a corrected run can be created

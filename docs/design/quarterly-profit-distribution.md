@@ -171,14 +171,14 @@ implementation:
 
 WA L&I (workers' comp) is hours-based, not wage-based — handled separately
 once risk classification is wired into `payroll_employees`. See the
-`US-WA-LNI` jurisdiction seeded in migration 0023 (currently `kind: todo`).
+`US-WA-LNI` jurisdiction seeded in migration 0027 (currently `kind: todo`).
 
 ## 8. Scope decisions
 
 ### In scope (Phase 1)
 
 - `entity_owners` + `distribution_policy` + `distribution_runs` +
-  `distribution_lines` tables (migration 0024).
+  `distribution_lines` tables (migration 0028).
 - Preview endpoint that computes available funds + pool splits + per-line
   amounts.
 - Approve / finalize endpoints (FSM same as payroll runs).
